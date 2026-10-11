@@ -8,12 +8,25 @@ Agent → http://127.0.0.1:8899/v1 → teeproxy → 已验证的 TLS 1.3 → tee
 
 agent 通过 base URL 直连本机的 teeproxy。默认入口使用回环 HTTP，无需配置本地证书或 HTTP 代理。teeproxy 到 router 的连接始终使用 HTTPS 和独立 TEE 校验。
 
-## 构建和启动
+## Windows 桌面版
+
+双击 `teeproxy.exe` 打开原生 Win32 窗口。在界面填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口、账号池及可选本地 key。
+
+- **保存配置**：将设置保存到当前 Windows 用户目录，密钥由 Windows DPAPI 加密。
+- **验证上游**：在后台校验真实 router，显示校验结果，不发送业务密钥。
+- **启动网关 / 停止**：控制本地 API 监听；停止会同时关闭现有连接和响应流。
+- **复制地址**：将本地 `/v1` 地址用于 agent 的 base URL。
+
+Windows 发行包见 [Releases](https://github.com/wangyi160/teeproxy/releases)。具体操作、配置保存位置和后台行为见 [桌面版说明](docs/DESKTOP.md)。
+
+## 源码构建和命令行
 
 ```sh
 cargo build --release --locked
 cp teeproxy.example.toml teeproxy.toml
 ```
+
+Windows 构建需要 Windows SDK（MSVC）或 MinGW 资源编译器。`cargo build --release --locked --all-features` 同时启用 TDX 和 SNP。Windows 无参数运行打开桌面窗口；以下命令行接口继续可用。桌面版直接在窗口里配置，无需编辑 TOML 或设置密钥环境变量。
 
 在 `teeproxy.toml` 填写 router 的 HTTPS 根地址和自己审核的 `tdx_policy` 或 `snp_policy`。相对路径以配置文件所在目录为基准。示例策略为空，启动会拒绝；策略建立方法见 [证明与策略](docs/ATTESTATION.md)。
 
@@ -40,7 +53,7 @@ Codex：将 [provider 示例](examples/codex.config.toml) 合并到用户配置�
 
 Claude Code：设置上述 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY=teeproxy-local`，运行 `claude --model <router模型ID>`。
 
-agent 的占位 key 会被移除。真实 router key 只保存在 teeproxy 进程中；如配置了可选 `client_key_env`，agent 应改用该独立本地 key。完整 PowerShell 命令、认证和版本迁移见 [客户端接入](docs/CLIENTS.md)。
+agent 的占位 key 会被移除。真实 router key 由 teeproxy 管理，agent 无需持有；如设置了桌面版的本地 key 或命令行的 `client_key_env`，agent 应改用该独立本地 key。完整 PowerShell 命令、认证和版本迁移见 [客户端接入](docs/CLIENTS.md)。
 
 ## 行为和范围
 

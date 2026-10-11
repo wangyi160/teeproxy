@@ -158,6 +158,44 @@ fn agent() -> reqwest::Client {
 }
 
 #[tokio::test]
+async fn shutdown_closes_active_streams_and_releases_the_listener() {
+    let upstream = upstream("teeproxy-unit-test", "stall").await;
+    let config = config(&upstream);
+    let trust = Trust {
+        allow_test_evidence: true,
+        ..Trust::default()
+    };
+    let gateway = Proxy::new(config, trust, "test-router-key", None).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(gateway.serve_until(listener, async {
+        let _ = stopped.await;
+    }));
+    let mut response = agent()
+        .post(format!("http://{address}/v1/responses"))
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+    assert!(response.chunk().await.unwrap().is_some());
+    stop.send(()).unwrap();
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        timeout(Duration::from_secs(2), response.chunk())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    let listener = TcpListener::bind(address).await.unwrap();
+    drop(listener);
+}
+
+#[tokio::test]
 async fn local_api_verifies_once_preserves_bytes_headers_and_reuses_the_attested_channel() {
     let upstream = upstream("teeproxy-unit-test", "json").await;
     let mut config = config(&upstream);

@@ -159,13 +159,30 @@ impl Proxy {
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
+        self.serve_until(listener, std::future::pending()).await
+    }
+
+    /// Stops accepting and closes all existing client streams before returning.
+    pub async fn serve_until(
+        self: Arc<Self>,
+        listener: TcpListener,
+        shutdown: impl Future<Output = ()>,
+    ) -> Result<()> {
         ensure!(
             listener.local_addr()?.ip().is_loopback(),
             "Listener must be loopback"
         );
         let address = listener.local_addr()?;
+        // Owning these tasks makes stopping the listener stop existing clients too.
+        let mut clients = tokio::task::JoinSet::new();
+        tokio::pin!(shutdown);
         loop {
-            let (socket, peer) = listener.accept().await?;
+            let (socket, peer) = tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                _ = clients.join_next(), if !clients.is_empty() => continue,
+                accepted = listener.accept() => accepted?,
+            };
             if !peer.ip().is_loopback() {
                 continue;
             }
@@ -173,7 +190,7 @@ impl Proxy {
                 continue;
             };
             let proxy = self.clone();
-            tokio::spawn(async move {
+            clients.spawn(async move {
                 let _permit = permit;
                 let service = service_fn(move |request| {
                     let proxy = proxy.clone();
@@ -184,6 +201,9 @@ impl Proxy {
                     .await;
             });
         }
+        drop(listener);
+        clients.shutdown().await;
+        Ok(())
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {

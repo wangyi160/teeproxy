@@ -6,6 +6,8 @@ teeproxy 作为本机 API 网关运行。把 agent 的 API base URL 指向它，
 
 按根目录 README 填写 router 地址与批准策略，通过受保护的环境向 teeproxy 提供 `TEEPROXY_ROUTER_KEY` 后启动它。以下 agent 命令在另一个终端运行；agent 不需要真实 router key。
 
+Windows 桌面版可直接在窗口填写上游地址、密钥和策略，并点击“启动网关”；无需为 teeproxy 配置环境变量。点击“复制地址”即可得到当前端口对应的 `/v1` 地址。
+
 ## Codex
 
 将 [provider 示例](../examples/codex.config.toml) 合并到用户级配置（Windows `%USERPROFILE%/.codex/config.toml`，Linux/macOS `~/.codex/config.toml`）。其中 `base_url` 为 `http://127.0.0.1:8899/v1`，`supports_websockets=false` 选择 router 支持的 HTTP Responses/SSE。
@@ -57,6 +59,8 @@ client_key_env = "TEEPROXY_CLIENT_KEY"
 ```
 
 向 teeproxy 提供该环境变量，值为 16–256 个可见 ASCII 字符。将同一个值配置到 agent 的 API key：Codex 用 `TEEPROXY_AGENT_KEY`，Claude Code 用 `ANTHROPIC_API_KEY`。本地 key 与 router key 分离，只在回环连接上使用。支持 `Authorization: Bearer ...`、`x-api-key` 或 `x-goog-api-key`；请求含有多项认证时必须全部匹配。失败返回 401。
+
+桌面版在“本地 key（可选）”直接填写同样格式的值，无需设置上述 teeproxy 环境变量；agent 的 API key 仍应与此值一致。
 
 ## 从 0.1 迁移
 

@@ -1,8 +1,12 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
 use teeproxy::{client, config::Config, proxy::Proxy};
 
-const HELP: &str = "teeproxy 0.2.0
+const HELP: &str = "teeproxy 0.3.0
+
+teeproxy                         Windows native GUI
+teeproxy gui [--settings PATH]  Windows native GUI with a separate profile
 
 teeproxy verify --config teeproxy.toml
 teeproxy run --config teeproxy.toml
@@ -12,9 +16,48 @@ The gateway verifies the router before sending data over upstream TLS.
 The router key is read only from the environment named by router_key_env.
 ";
 
-#[tokio::main]
-async fn main() {
-    if let Err(error) = execute().await {
+fn main() {
+    #[cfg(windows)]
+    {
+        let args: Vec<_> = std::env::args().skip(1).collect();
+        let gui = args.is_empty() || args.first().is_some_and(|v| v == "gui");
+        if gui {
+            let result = (|| -> Result<()> {
+                let path = match args.as_slice() {
+                    [] | [_] => None,
+                    [_, option, path] if option == "--settings" => Some(path.into()),
+                    _ => anyhow::bail!("Usage: teeproxy gui [--settings PATH]"),
+                };
+                teeproxy::desktop::run(path)
+            })();
+            if let Err(error) = result {
+                let text: Vec<u16> = format!("{error:#}").encode_utf16().chain(Some(0)).collect();
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                        std::ptr::null_mut(),
+                        text.as_ptr(),
+                        windows_sys::core::w!("teeproxy"),
+                        windows_sys::Win32::UI::WindowsAndMessaging::MB_OK
+                            | windows_sys::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+                    );
+                }
+                std::process::exit(1);
+            }
+            return;
+        }
+        // Preserve redirected CLI handles; attach only when launched from a console.
+        unsafe {
+            use windows_sys::Win32::{Foundation::INVALID_HANDLE_VALUE, System::Console::*};
+            let output = GetStdHandle(STD_OUTPUT_HANDLE);
+            if output.is_null() || output == INVALID_HANDLE_VALUE {
+                AttachConsole(ATTACH_PARENT_PROCESS);
+            }
+        }
+    }
+    let result = tokio::runtime::Runtime::new()
+        .context("Cannot start runtime")
+        .and_then(|runtime| runtime.block_on(execute()));
+    if let Err(error) = result {
         eprintln!("teeproxy: {error:#}");
         std::process::exit(1);
     }

@@ -1,6 +1,8 @@
 teeproxy includes the independent Rust attestation client developed alongside
 teerouter, adapted into a loopback API gateway with verified TLS connection
 pooling, bounded streaming and agent base-URL configuration.
+The Windows desktop frontend uses native Win32 controls and current-user DPAPI
+for locally saved credentials. It embeds its application manifest and icon.
 
 The inherited MIT notice is retained in LICENSE. The teellm protocol domain and
 attestation endpoint names are retained for wire compatibility with teerouter.
