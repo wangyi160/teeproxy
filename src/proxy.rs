@@ -1,11 +1,9 @@
 use crate::{
-    ca::LocalCa,
     client::{Trust, VerifiedSession, verify},
-    config::{Config, Route},
+    config::Config,
     protocol::{MAX_BODY, allowed_api},
 };
 use anyhow::{Result, ensure};
-use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited, combinators::UnsyncBoxBody};
 use hyper::{
@@ -16,10 +14,10 @@ use hyper::{
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use std::{
-    collections::HashMap,
     convert::Infallible,
     future::Future,
     io::{self, Read},
+    net::SocketAddr,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -31,7 +29,6 @@ use tokio::{
     sync::{OwnedSemaphorePermit, Semaphore},
     time::{Sleep, timeout},
 };
-use tokio_rustls::TlsAcceptor;
 
 type ProxyBody = UnsyncBoxBody<Bytes, io::Error>;
 
@@ -114,12 +111,11 @@ impl Body for ForwardBody {
 
 pub struct Proxy {
     config: Config,
-    certificates: HashMap<String, Arc<rustls::ServerConfig>>,
     pool: Arc<SessionPool>,
     requests: Arc<Semaphore>,
     connections: Arc<Semaphore>,
     router_auth: HeaderValue,
-    proxy_auth: Option<String>,
+    client_key: Option<zeroize::Zeroizing<String>>,
 }
 
 impl Proxy {
@@ -127,7 +123,7 @@ impl Proxy {
         config: Config,
         trust: Trust,
         router_key: &str,
-        proxy_token: Option<&str>,
+        client_key: Option<&str>,
     ) -> Result<Arc<Self>> {
         config.validate()?;
         ensure!(
@@ -138,20 +134,17 @@ impl Proxy {
             .parse()
             .map_err(|_| anyhow::anyhow!("Invalid router key"))?;
         router_auth.set_sensitive(true);
-        if let Some(token) = proxy_token {
+        ensure!(
+            config.client_key_env.is_some() == client_key.is_some(),
+            "Missing or unexpected local client key"
+        );
+        if let Some(key) = client_key {
             ensure!(
-                token.len() >= 16 && token.len() <= 256 && !token.contains(['\r', '\n']),
-                "Proxy token must contain 16 to 256 characters"
+                key.len() >= 16 && key.len() <= 256 && key.bytes().all(|c| c.is_ascii_graphic()),
+                "Client key must contain 16 to 256 visible ASCII characters"
             );
         }
-        let ca = LocalCa::load(&config.ca_dir)?;
-        let certificates = config
-            .routes
-            .iter()
-            .map(|r| Ok((r.host.clone(), ca.tls_for_host(&r.host)?)))
-            .collect::<Result<_>>()?;
         Ok(Arc::new(Self {
-            certificates,
             requests: Arc::new(Semaphore::new(config.max_in_flight)),
             connections: Arc::new(Semaphore::new(config.max_connections)),
             pool: Arc::new(SessionPool {
@@ -160,8 +153,7 @@ impl Proxy {
                 idle: Mutex::new(Vec::new()),
             }),
             router_auth,
-            proxy_auth: proxy_token
-                .map(|t| format!("Basic {}", STANDARD.encode(format!("teeproxy:{t}")))),
+            client_key: client_key.map(|key| zeroize::Zeroizing::new(key.to_owned())),
             config,
         }))
     }
@@ -171,6 +163,7 @@ impl Proxy {
             listener.local_addr()?.ip().is_loopback(),
             "Listener must be loopback"
         );
+        let address = listener.local_addr()?;
         loop {
             let (socket, peer) = listener.accept().await?;
             if !peer.ip().is_loopback() {
@@ -181,32 +174,61 @@ impl Proxy {
             };
             let proxy = self.clone();
             tokio::spawn(async move {
-                let permit = Arc::new(permit);
-                let guard = permit.clone();
+                let _permit = permit;
                 let service = service_fn(move |request| {
                     let proxy = proxy.clone();
-                    let permit = permit.clone();
-                    async move { Ok::<_, Infallible>(proxy.handle(request, permit).await) }
+                    async move { Ok::<_, Infallible>(proxy.forward(request, address).await) }
                 });
-                let _guard = guard;
                 let _ = http_server()
                     .serve_connection(TokioIo::new(socket), service)
-                    .with_upgrades()
                     .await;
             });
         }
     }
 
-    async fn handle(
+    fn authorized(&self, headers: &HeaderMap) -> bool {
+        let Some(expected) = &self.client_key else {
+            return true;
+        };
+        let mut found = false;
+        for name in ["authorization", "x-api-key", "x-goog-api-key"] {
+            for value in headers.get_all(name) {
+                let Ok(value) = value.to_str() else {
+                    return false;
+                };
+                let token = if name == "authorization" {
+                    let Some((scheme, token)) = value.split_once(' ') else {
+                        return false;
+                    };
+                    if !scheme.eq_ignore_ascii_case("Bearer") {
+                        return false;
+                    }
+                    token
+                } else {
+                    value
+                };
+                if !bool::from(token.as_bytes().ct_eq(expected.as_bytes())) {
+                    return false;
+                }
+                found = true;
+            }
+        }
+        found
+    }
+
+    async fn forward(
         self: Arc<Self>,
-        mut request: Request<Incoming>,
-        permit: Arc<OwnedSemaphorePermit>,
+        request: Request<Incoming>,
+        address: SocketAddr,
     ) -> Response<ProxyBody> {
+        if request.method() == Method::CONNECT {
+            return failure(405, "connect_not_supported_use_api_base_url");
+        }
         if !self.authorized(request.headers()) {
-            let mut response = failure(407, "proxy_authentication_required");
+            let mut response = failure(401, "client_authentication_required");
             response.headers_mut().insert(
-                "proxy-authenticate",
-                HeaderValue::from_static("Basic realm=\"teeproxy\""),
+                "www-authenticate",
+                HeaderValue::from_static("Bearer realm=\"teeproxy\""),
             );
             return response;
         }
@@ -215,90 +237,13 @@ impl Proxy {
         {
             return failure(403, "browser_request_rejected");
         }
-        if request.method() != Method::CONNECT {
-            return self.forward(request, None).await;
-        }
-        let Some(authority) = request.uri().authority() else {
-            return failure(400, "invalid_connect");
-        };
-        if authority.port_u16() != Some(443)
-            || authority.as_str().contains('@')
-            || request.uri().scheme().is_some()
-            || request.uri().path_and_query().is_some()
-            || request.headers().contains_key("transfer-encoding")
-            || request
-                .headers()
-                .get("content-length")
-                .is_some_and(|v| v != "0")
-        {
-            return failure(400, "invalid_connect");
-        }
-        let host = authority.host().to_ascii_lowercase();
-        let Some(tls) = self.certificates.get(&host).cloned() else {
-            return failure(403, "host_not_configured");
-        };
-        tokio::spawn(async move {
-            let _permit = permit;
-            let Ok(Ok(upgraded)) =
-                timeout(Duration::from_secs(10), hyper::upgrade::on(&mut request)).await
-            else {
-                return;
-            };
-            let Ok(Ok(stream)) = timeout(
-                Duration::from_secs(10),
-                TlsAcceptor::from(tls).accept(TokioIo::new(upgraded)),
-            )
-            .await
-            else {
-                return;
-            };
-            if stream
-                .get_ref()
-                .1
-                .server_name()
-                .is_some_and(|s| !s.eq_ignore_ascii_case(&host))
-            {
-                return;
-            }
-            let service = service_fn(move |request| {
-                let proxy = self.clone();
-                let host = host.clone();
-                async move { Ok::<_, Infallible>(proxy.forward(request, Some(&host)).await) }
-            });
-            let _ = http_server()
-                .serve_connection(TokioIo::new(stream), service)
-                .await;
-        });
-        Response::new(empty())
-    }
-
-    fn authorized(&self, headers: &HeaderMap) -> bool {
-        match &self.proxy_auth {
-            None => true,
-            Some(expected) => headers
-                .get("proxy-authorization")
-                .is_some_and(|v| bool::from(v.as_bytes().ct_eq(expected.as_bytes()))),
-        }
-    }
-
-    async fn forward(
-        self: Arc<Self>,
-        request: Request<Incoming>,
-        tunnel: Option<&str>,
-    ) -> Response<ProxyBody> {
-        if request.headers().contains_key("origin")
-            || request.headers().contains_key("sec-fetch-site")
-        {
-            return failure(403, "browser_request_rejected");
-        }
         if request.headers().contains_key("upgrade") {
             return failure(501, "websocket_not_supported_use_http_sse");
         }
-        let (route, uri) = match route_request(&self.config.routes, &request, tunnel) {
+        let uri = match route_request(&request, address) {
             Ok(value) => value,
             Err(code) => return failure(code, "request_not_allowed"),
         };
-        let pool_name = route.pool.clone();
         let Ok(permit) = self.requests.clone().try_acquire_owned() else {
             return failure(503, "proxy_busy");
         };
@@ -330,7 +275,7 @@ impl Proxy {
         request
             .headers_mut()
             .insert("authorization", self.router_auth.clone());
-        if let Some(pool) = pool_name {
+        if let Some(pool) = &self.config.pool {
             request
                 .headers_mut()
                 .insert("x-router-pool", pool.parse().expect("validated pool"));
@@ -369,56 +314,39 @@ fn http_server() -> hyper::server::conn::http1::Builder {
     builder
 }
 
-fn route_request<'a>(
-    routes: &'a [Route],
-    request: &Request<Incoming>,
-    tunnel: Option<&str>,
-) -> Result<(&'a Route, Uri), u16> {
+fn route_request(request: &Request<Incoming>, address: SocketAddr) -> Result<Uri, u16> {
     let uri = request.uri();
-    let host_header = request
+    // Accept origin-form requests to this listener, never forward-proxy targets.
+    if uri.scheme().is_some() || uri.authority().is_some() || !uri.path().starts_with('/') {
+        return Err(400);
+    }
+    if request.headers().get_all("host").iter().count() != 1 {
+        return Err(400);
+    }
+    let authority = request
         .headers()
         .get("host")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<http::uri::Authority>().ok())
         .ok_or(400u16)?;
-    if host_header.as_str().contains('@') {
+    let host = authority
+        .host()
+        .trim_start_matches('[')
+        .trim_end_matches(']');
+    let matches_listener = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip == address.ip());
+    if authority.as_str().contains('@')
+        || !matches_listener
+        || authority.port_u16().unwrap_or(80) != address.port()
+    {
         return Err(400);
     }
-    let host = host_header.host().to_ascii_lowercase();
-    if let Some(expected) = tunnel {
-        if host != expected
-            || !matches!(host_header.port_u16(), None | Some(443))
-            || uri.scheme().is_some()
-            || uri.authority().is_some()
-        {
-            return Err(400);
-        }
-    } else {
-        let authority = uri.authority().ok_or(400u16)?;
-        let port = match uri.scheme_str() {
-            Some("http") => 80,
-            Some("https") => 443,
-            _ => return Err(400),
-        };
-        if authority.as_str().contains('@')
-            || !authority.host().eq_ignore_ascii_case(&host)
-            || authority.port_u16().unwrap_or(port) != port
-            || host_header.port_u16().unwrap_or(port) != port
-        {
-            return Err(400);
-        }
-    }
-    let route = routes.iter().find(|r| r.host == host).ok_or(403u16)?;
-    let suffix = uri
-        .path()
-        .strip_prefix(&route.prefix)
-        .filter(|s| s.starts_with('/'))
-        .ok_or(404u16)?;
-    let path = format!("{}{suffix}", route.router_prefix);
-    if !allowed_api(request.method().as_str(), &path) {
+    if !allowed_api(request.method().as_str(), uri.path()) {
         return Err(404);
     }
-    let uri = if let Some(query) = uri.query() {
+    if let Some(query) = uri.query() {
         let parsed =
             reqwest::Url::parse(&format!("https://local.invalid/?{query}")).map_err(|_| 400u16)?;
         if parsed
@@ -427,11 +355,8 @@ fn route_request<'a>(
         {
             return Err(400);
         }
-        format!("{path}?{query}")
-    } else {
-        path
-    };
-    Ok((route, uri.parse().map_err(|_| 400u16)?))
+    }
+    Ok(uri.clone())
 }
 
 fn clean_headers(headers: &HeaderMap, request: bool) -> HeaderMap {
@@ -507,11 +432,6 @@ fn decode_body(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, u16> {
     }
 }
 
-fn empty() -> ProxyBody {
-    Full::new(Bytes::new())
-        .map_err(|never| match never {})
-        .boxed_unsync()
-}
 fn failure(code: u16, kind: &'static str) -> Response<ProxyBody> {
     let bytes =
         serde_json::to_vec(&serde_json::json!({"error":{"type":kind,"message":kind}})).unwrap();

@@ -1,5 +1,4 @@
-//! A loopback HTTP proxy that sends business data only on attested TLS sessions.
-pub mod ca;
+//! A loopback API gateway that sends business data only on attested TLS sessions.
 pub mod client;
 pub mod config;
 pub mod protocol;

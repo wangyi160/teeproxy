@@ -1,6 +1,5 @@
-//! TLS/CONNECT integration tests. Synthetic trust exists only under cfg(test).
+//! Local API gateway integration tests. Synthetic trust exists only under cfg(test).
 use crate::{
-    ca,
     client::{Trust, verify},
     config::Config,
     protocol::*,
@@ -125,17 +124,17 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
     }
 }
 
-fn config(upstream: &Upstream, dir: &std::path::Path) -> Config {
+fn config(upstream: &Upstream) -> Config {
     let mut config: Config = toml::from_str(include_str!("../teeproxy.example.toml")).unwrap();
     config.router = upstream.running.url.clone();
-    config.ca_dir = dir.to_owned();
     config.listen = "127.0.0.1:0".parse().unwrap();
     config.tdx_policy = None;
     config.max_in_flight = 1;
     config
 }
 
-async fn proxy(config: Config, allow_test: bool, auth: Option<&str>) -> Running {
+async fn proxy(mut config: Config, allow_test: bool, auth: Option<&str>) -> Running {
+    config.client_key_env = auth.map(|_| "TEST_CLIENT_KEY".into());
     let trust = Trust {
         allow_test_evidence: allow_test,
         ..Trust::default()
@@ -149,16 +148,9 @@ async fn proxy(config: Config, allow_test: bool, auth: Option<&str>) -> Running 
     Running { url, task }
 }
 
-fn agent(proxy: &Running, ca_dir: &std::path::Path, auth: Option<&str>) -> reqwest::Client {
-    let mut settings = reqwest::Proxy::all(&proxy.url).unwrap();
-    if let Some(token) = auth {
-        settings = settings.basic_auth("teeproxy", token);
-    }
+fn agent() -> reqwest::Client {
     reqwest::Client::builder()
-        .proxy(settings)
-        .add_root_certificate(
-            reqwest::Certificate::from_pem(&std::fs::read(ca_dir.join("ca.pem")).unwrap()).unwrap(),
-        )
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(5))
         .build()
@@ -166,18 +158,16 @@ fn agent(proxy: &Running, ca_dir: &std::path::Path, auth: Option<&str>) -> reqwe
 }
 
 #[tokio::test]
-async fn connect_verifies_once_preserves_bytes_headers_and_reuses_the_attested_channel() {
+async fn local_api_verifies_once_preserves_bytes_headers_and_reuses_the_attested_channel() {
     let upstream = upstream("teeproxy-unit-test", "json").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let mut config = config(&upstream, dir.path());
-    config.routes[0].pool = Some("selected-pool".into());
+    let mut config = config(&upstream);
+    config.pool = Some("selected-pool".into());
     let proxy = proxy(config, true, None).await;
-    let agent = agent(&proxy, dir.path(), None);
+    let agent = agent();
     let raw = "{ \"model\":\"literal-model-id\", \"input\":\"hello 世界\", \"stream\":true }";
     for _ in 0..2 {
         let response = agent
-            .post("https://api.openai.com/v1/responses?beta=true")
+            .post(format!("{}/v1/responses?beta=true", proxy.url))
             .header("authorization", "Bearer agent-credential-must-not-leak")
             .header("x-api-key", "another-agent-secret")
             .header("cookie", "session=private")
@@ -219,11 +209,9 @@ async fn sample_evidence_bad_binding_and_empty_trust_send_no_business_data() {
         ("dstack_tdx", "json", false),
     ] {
         let upstream = upstream(kind, mode).await;
-        let dir = tempfile::tempdir().unwrap();
-        ca::init(dir.path()).unwrap();
-        let proxy = proxy(config(&upstream, dir.path()), allow_test, None).await;
-        let response = agent(&proxy, dir.path(), None)
-            .post("https://api.anthropic.com/v1/messages")
+        let proxy = proxy(config(&upstream), allow_test, None).await;
+        let response = agent()
+            .post(format!("{}/v1/messages", proxy.url))
             .body("never-forward-this-prompt")
             .send()
             .await
@@ -244,12 +232,10 @@ async fn sample_evidence_bad_binding_and_empty_trust_send_no_business_data() {
 #[tokio::test]
 async fn sse_is_not_buffered_and_concurrency_is_held_until_stream_finishes() {
     let upstream = upstream("teeproxy-unit-test", "stream").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let proxy = proxy(config(&upstream, dir.path()), true, None).await;
-    let agent = agent(&proxy, dir.path(), None);
+    let proxy = proxy(config(&upstream), true, None).await;
+    let agent = agent();
     let mut response = agent
-        .post("https://api.openai.com/v1/responses")
+        .post(format!("{}/v1/responses", proxy.url))
         .body("{}")
         .send()
         .await
@@ -263,7 +249,7 @@ async fn sse_is_not_buffered_and_concurrency_is_held_until_stream_finishes() {
         "data: first\n\n"
     );
     let busy = agent
-        .post("https://api.openai.com/v1/responses")
+        .post(format!("{}/v1/responses", proxy.url))
         .body("{}")
         .send()
         .await
@@ -271,7 +257,7 @@ async fn sse_is_not_buffered_and_concurrency_is_held_until_stream_finishes() {
     assert_eq!(busy.status(), 503);
     assert_eq!(response.text().await.unwrap(), "data: [DONE]\n\n");
     let response = agent
-        .post("https://api.openai.com/v1/responses")
+        .post(format!("{}/v1/responses", proxy.url))
         .body("{}")
         .send()
         .await
@@ -284,12 +270,10 @@ async fn sse_is_not_buffered_and_concurrency_is_held_until_stream_finishes() {
 #[tokio::test]
 async fn streaming_cancellation_discards_connection_and_releases_capacity() {
     let upstream = upstream("teeproxy-unit-test", "stall").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let proxy = proxy(config(&upstream, dir.path()), true, None).await;
-    let agent = agent(&proxy, dir.path(), None);
+    let proxy = proxy(config(&upstream), true, None).await;
+    let agent = agent();
     let mut response = agent
-        .post("https://api.openai.com/v1/responses")
+        .post(format!("{}/v1/responses", proxy.url))
         .body("{}")
         .send()
         .await
@@ -299,7 +283,7 @@ async fn streaming_cancellation_discards_connection_and_releases_capacity() {
     timeout(Duration::from_secs(3), async {
         loop {
             let response = agent
-                .post("https://api.openai.com/v1/responses")
+                .post(format!("{}/v1/responses", proxy.url))
                 .body("{}")
                 .send()
                 .await
@@ -317,16 +301,14 @@ async fn streaming_cancellation_discards_connection_and_releases_capacity() {
 }
 
 #[tokio::test]
-async fn absolute_http_proxy_gzip_and_configured_path_mapping_work() {
+async fn local_api_gzip_preserves_decompressed_bytes() {
     use std::io::Write;
     let upstream = upstream("teeproxy-unit-test", "json").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let proxy = proxy(config(&upstream, dir.path()), true, None).await;
+    let proxy = proxy(config(&upstream), true, None).await;
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
     gzip.write_all(b"{ \"input\": \"exact bytes\" }").unwrap();
-    let response = agent(&proxy, dir.path(), None)
-        .post("http://chatgpt.com/backend-api/codex/responses")
+    let response = agent()
+        .post(format!("{}/v1/responses", proxy.url))
         .header("content-encoding", "gzip")
         .body(gzip.finish().unwrap())
         .send()
@@ -341,33 +323,33 @@ async fn absolute_http_proxy_gzip_and_configured_path_mapping_work() {
 }
 
 #[tokio::test]
-async fn unknown_hosts_admin_paths_query_credentials_and_websockets_are_blocked() {
+async fn proxy_targets_admin_paths_query_credentials_and_websockets_are_blocked() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let upstream = upstream("teeproxy-unit-test", "json").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let proxy = proxy(config(&upstream, dir.path()), true, None).await;
-    let agent = agent(&proxy, dir.path(), None);
-    for (url, code) in [
-        ("http://unconfigured.invalid/v1/responses", 403),
-        ("https://api.openai.com/admin/checkpoint", 404),
-        ("https://api.openai.com/v1/responses?api_key=secret", 400),
-        ("https://api.openai.com/v1/responses/compact", 404),
+    let proxy = proxy(config(&upstream), true, None).await;
+    let agent = agent();
+    for (path, code) in [
+        ("/admin/checkpoint", 404),
+        ("/v1/responses?api_key=secret", 400),
+        ("/v1/responses?%6bey=secret", 400),
+        ("/v1/responses/compact", 404),
+        ("/backend-api/codex/responses", 404),
+        ("/v1/%72esponses", 404),
     ] {
         assert_eq!(
-            agent.post(url).body("{}").send().await.unwrap().status(),
+            agent
+                .post(format!("{}{path}", proxy.url))
+                .body("{}")
+                .send()
+                .await
+                .unwrap()
+                .status(),
             code
         );
     }
-    assert!(
-        agent
-            .get("https://unconfigured.invalid/v1/models")
-            .send()
-            .await
-            .is_err()
-    );
     assert_eq!(
         agent
-            .get("https://api.openai.com/v1/responses")
+            .get(format!("{}/v1/responses", proxy.url))
             .header("upgrade", "websocket")
             .send()
             .await
@@ -375,39 +357,73 @@ async fn unknown_hosts_admin_paths_query_credentials_and_websockets_are_blocked(
             .status(),
         501
     );
+    let address = proxy.url.strip_prefix("http://").unwrap();
+    for (target, code) in [
+        ("CONNECT api.openai.com:443 HTTP/1.1", "405"),
+        ("GET http://api.openai.com/v1/models HTTP/1.1", "400"),
+    ] {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream
+            .write_all(
+                format!("{target}\r\nHost: {address}\r\nConnection: close\r\n\r\n").as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        timeout(Duration::from_secs(3), stream.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {code}")),
+            "{response}"
+        );
+    }
     assert_eq!(upstream.attestations.load(Ordering::SeqCst), 0);
     assert!(upstream.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn optional_proxy_auth_is_required_and_never_forwarded() {
+async fn optional_client_key_accepts_agent_auth_headers_and_never_forwards_them() {
     let upstream = upstream("teeproxy-unit-test", "json").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let token = "local-proxy-token-for-test";
-    let proxy = proxy(config(&upstream, dir.path()), true, Some(token)).await;
-    let response = agent(&proxy, dir.path(), None)
-        .get("http://api.openai.com/v1/models")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 407);
-    let response = agent(&proxy, dir.path(), Some(token))
-        .get("https://api.openai.com/v1/models")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 201);
-    response.bytes().await.unwrap();
-    assert!(
-        !upstream.calls.lock().unwrap()[0]
-            .headers
-            .contains_key("proxy-authorization")
-    );
+    let token = "local-client-key-for-test";
+    let proxy = proxy(config(&upstream), true, Some(token)).await;
+    let agent = agent();
+    let url = format!("{}/v1/models", proxy.url);
+    for request in [
+        agent.get(&url),
+        agent.get(&url).bearer_auth("wrong-key"),
+        agent
+            .get(&url)
+            .bearer_auth(token)
+            .header("x-api-key", "conflicting-key"),
+    ] {
+        assert_eq!(request.send().await.unwrap().status(), 401);
+    }
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 0);
+    for (header, value) in [
+        ("authorization", format!("Bearer {token}")),
+        ("x-api-key", token.to_owned()),
+        ("x-goog-api-key", token.to_owned()),
+    ] {
+        let response = agent.get(&url).header(header, value).send().await.unwrap();
+        assert_eq!(response.status(), 201);
+        response.bytes().await.unwrap();
+    }
+    let calls = upstream.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    for call in calls.iter() {
+        assert_eq!(
+            call.headers["authorization"],
+            "Bearer router-key-not-provider-key"
+        );
+        assert!(!call.headers.contains_key("x-api-key"));
+        assert!(!call.headers.contains_key("x-goog-api-key"));
+    }
 }
 
 #[test]
-fn config_ca_and_policy_fail_closed() {
+fn config_and_policy_fail_closed() {
     let mut config: Config = toml::from_str(include_str!("../teeproxy.example.toml")).unwrap();
     config.validate().unwrap();
     assert!(config.trust().is_err());
@@ -418,15 +434,12 @@ fn config_ca_and_policy_fail_closed() {
     assert!(config.validate().is_err());
     config.router = "https://user:secret@router.invalid".into();
     assert!(config.validate().is_err());
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let before = std::fs::read(dir.path().join("ca.pem")).unwrap();
-    assert!(ca::init(dir.path()).is_err());
-    assert_eq!(before, std::fs::read(dir.path().join("ca.pem")).unwrap());
-    let other = tempfile::tempdir().unwrap();
-    ca::init(other.path()).unwrap();
-    std::fs::copy(other.path().join("ca.key"), dir.path().join("ca.key")).unwrap();
-    assert!(ca::LocalCa::load(dir.path()).is_err());
+    assert!(
+        toml::from_str::<Config>(
+            &(include_str!("../teeproxy.example.toml").to_owned() + "\nca_dir = \"old-ca\"\n")
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test]
@@ -443,16 +456,14 @@ async fn plaintext_router_url_never_yields_a_verified_session() {
 async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation() {
     use std::io::Write;
     let upstream = upstream("teeproxy-unit-test", "json").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let proxy = proxy(config(&upstream, dir.path()), true, None).await;
-    let agent = agent(&proxy, dir.path(), None);
-    for scheme in ["http", "https"] {
-        let url = format!("{scheme}://api.openai.com/v1/responses");
+    let proxy = proxy(config(&upstream), true, None).await;
+    let agent = agent();
+    let url = format!("{}/v1/responses", proxy.url);
+    for host in ["attacker.invalid", "127.0.0.1:1", "localhost:1"] {
         assert_eq!(
             agent
                 .post(&url)
-                .header("host", "api.anthropic.com")
+                .header("host", host)
                 .body("{}")
                 .send()
                 .await
@@ -460,22 +471,22 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
                 .status(),
             400
         );
-        assert_eq!(
-            agent
-                .post(&url)
-                .header("origin", "https://example.com")
-                .body("{}")
-                .send()
-                .await
-                .unwrap()
-                .status(),
-            403
-        );
     }
-    let url = "https://api.openai.com/v1/responses";
     assert_eq!(
         agent
-            .post(url)
+            .post(&url)
+            .header("origin", "https://example.com")
+            .body("{}")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let url = format!("{}/v1/responses", proxy.url);
+    assert_eq!(
+        agent
+            .post(&url)
             .body(vec![b'x'; MAX_BODY + 1])
             .send()
             .await
@@ -487,7 +498,7 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
     gzip.write_all(&vec![b'x'; MAX_BODY + 1]).unwrap();
     assert_eq!(
         agent
-            .post(url)
+            .post(&url)
             .header("content-encoding", "gzip")
             .body(gzip.finish().unwrap())
             .send()
@@ -498,7 +509,7 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
     );
     assert_eq!(
         agent
-            .post(url)
+            .post(&url)
             .header("content-encoding", "br")
             .body("{}")
             .send()
@@ -514,14 +525,12 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
 #[tokio::test]
 async fn idle_stream_timeout_closes_channel_and_releases_capacity() {
     let upstream = upstream("teeproxy-unit-test", "stall").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let mut config = config(&upstream, dir.path());
+    let mut config = config(&upstream);
     config.stream_idle_secs = 1;
     let proxy = proxy(config, true, None).await;
-    let agent = agent(&proxy, dir.path(), None);
+    let agent = agent();
     let mut response = agent
-        .post("https://api.openai.com/v1/responses")
+        .post(format!("{}/v1/responses", proxy.url))
         .body("{}")
         .send()
         .await
@@ -534,7 +543,7 @@ async fn idle_stream_timeout_closes_channel_and_releases_capacity() {
             .is_err()
     );
     let response = agent
-        .post("https://api.openai.com/v1/responses")
+        .post(format!("{}/v1/responses", proxy.url))
         .body("{}")
         .send()
         .await
@@ -546,10 +555,17 @@ async fn idle_stream_timeout_closes_channel_and_releases_capacity() {
 #[tokio::test]
 async fn native_gemini_path_is_forwarded_without_model_rewriting() {
     let upstream = upstream("teeproxy-unit-test", "json").await;
-    let dir = tempfile::tempdir().unwrap();
-    ca::init(dir.path()).unwrap();
-    let proxy = proxy(config(&upstream, dir.path()), true, None).await;
-    let response = agent(&proxy, dir.path(), None).post("https://generativelanguage.googleapis.com/v1beta/models/model-id:streamGenerateContent?alt=sse").header("x-goog-api-key", "agent-secret").body("{}").send().await.unwrap();
+    let proxy = proxy(config(&upstream), true, None).await;
+    let response = agent()
+        .post(format!(
+            "{}/v1beta/models/model-id:streamGenerateContent?alt=sse",
+            proxy.url
+        ))
+        .header("x-goog-api-key", "agent-secret")
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.status(), 201);
     response.bytes().await.unwrap();
     let calls = upstream.calls.lock().unwrap();

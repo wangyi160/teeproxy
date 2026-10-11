@@ -1,63 +1,73 @@
 # 客户端接入
 
-## 先启动代理
+## 本地入口
 
-按根目录 README 创建 CA，填写 router 地址与本地批准的策略，并向 **teeproxy 进程**注入真实的 `TEEPROXY_ROUTER_KEY`。这个 key 是 router 的普通业务 key，不是 router 管理凭证。启动代理后，再在单独终端配置 agent。
+teeproxy 作为本机 API 网关运行。把 agent 的 API base URL 指向它，teeproxy 负责向固定 router 建立 TLS、独立验证证明并转发请求。默认使用 `http://127.0.0.1:8899`，无需生成、安装或信任本地 CA。不要把这个地址设为 HTTP_PROXY/HTTPS_PROXY。
 
-teeproxy 是用户本机的可信进程，会接触提示词和回答。请将 CA 私钥保存在自己的用户私有目录；不要共享 `ca.key`。Unix 创建的目录/文件权限分别为 0700/0600；Windows 使用目录继承的 ACL，应放在当前用户独占的目录下。`init-ca` 不覆盖现有 CA，也不安装系统信任。
+按根目录 README 填写 router 地址与批准策略，通过受保护的环境向 teeproxy 提供 `TEEPROXY_ROUTER_KEY` 后启动它。以下 agent 命令在另一个终端运行；agent 不需要真实 router key。
 
-## PowerShell
+## Codex
 
-假定当前目录是 teeproxy 的配置目录：
+将 [provider 示例](../examples/codex.config.toml) 合并到用户级配置（Windows `%USERPROFILE%/.codex/config.toml`，Linux/macOS `~/.codex/config.toml`）。其中 `base_url` 为 `http://127.0.0.1:8899/v1`，`supports_websockets=false` 选择 router 支持的 HTTP Responses/SSE。
 
-```powershell
-$env:HTTP_PROXY = 'http://127.0.0.1:8899'
-$env:HTTPS_PROXY = $env:HTTP_PROXY
-$env:NO_PROXY = 'localhost,127.0.0.1,::1'
-$env:CODEX_CA_CERTIFICATE = (Resolve-Path '.teeproxy/ca/ca.pem').Path
-$env:NODE_EXTRA_CA_CERTS = $env:CODEX_CA_CERTIFICATE
-```
-
-这只改变当前终端及它启动的进程。Windows 环境变量名称不区分大小写。Linux/macOS 如果已有小写代理变量，应一起更新，避免覆盖大写设置。
-
-Codex：将 [配置示例](../examples/codex.config.toml) 中的 provider/profile 合并到自己的配置，接着：
+PowerShell：
 
 ```powershell
 $env:TEEPROXY_AGENT_KEY = 'teeproxy-local'
 codex --profile teeproxy --model YOUR_ROUTER_MODEL_ID
 ```
 
-使用独立 provider 将 `supports_websockets` 设置为 false，以匹配 router 的 HTTP Responses/SSE 接口。选择 router 目录中的真实模型 ID，不要将账号池前缀拼到模型名中；账号池可在 teeproxy 的对应 route 上配置 `pool`。
+Linux/macOS：
 
-Codex 的 CA 环境变量与 provider 字段参考 [OpenAI 身份验证文档](https://learn.chatgpt.com/docs/auth) 和 [配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+```sh
+export TEEPROXY_AGENT_KEY=teeproxy-local
+codex --profile teeproxy --model YOUR_ROUTER_MODEL_ID
+```
 
-Claude Code：
+这里使用的是 OpenAI Docs 中的自定义 provider 字段，参考 [官方配置文档](https://learn.chatgpt.com/docs/config-file/config-reference)。模型 ID 应来自 router 目录；账号池通过 teeproxy 的 `pool` 配置选择。
+
+## Claude Code
+
+Claude Code 的 base URL 使用根地址，SDK 自行追加 `/v1/messages`；不要重复添加 `/v1`。
+
+PowerShell：
 
 ```powershell
+$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:8899'
 $env:ANTHROPIC_API_KEY = 'teeproxy-local'
 claude --model YOUR_ROUTER_MODEL_ID
 ```
 
-使用 API-key 模式接入 router；占位 key 只满足 agent 本地设置，teeproxy 会替换认证。无需向 agent 提供供应商账号或 router 管理密钥。Claude Code 的代理和 CA 设置参考 [官方网络配置](https://code.claude.com/docs/en/network-config)。终端、后台 agent 和 Desktop 的环境继承规则不同；这里的命令针对从该终端启动的 CLI。
+Linux/macOS：
 
-## 可选代理认证
-
-如需限制本机其他进程使用代理，配置：
-
-```toml
-proxy_token_env = "TEEPROXY_CLIENT_TOKEN"
+```sh
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8899
+export ANTHROPIC_API_KEY=teeproxy-local
+claude --model YOUR_ROUTER_MODEL_ID
 ```
 
-向 teeproxy 提供该环境变量，长度至少 16 字符。agent 的代理 URL 使用 `http://teeproxy:PERCENT_ENCODED_TOKEN@127.0.0.1:8899`。这个 token 与 router key 分离，仅用于本地代理认证；不要提交到配置、脚本或 Git。省略该设置时，能访问监听地址的本机进程均可使用代理。
+使用 API-key 模式。若现有环境还设置了 `ANTHROPIC_AUTH_TOKEN` 或其他认证助手，应避免它们覆盖本地 key；认证选择见 [Claude Code 官方网关说明](https://code.claude.com/docs/en/llm-gateway)。teeproxy 支持标准 Bearer 和 `x-api-key` 认证头。
 
-## 兼容限制
+## 可选本地认证
 
-- HTTPS CONNECT 只接受配置的精确域名和 443 端口；TLS 内的 Host 必须与 CONNECT 一致。HTTP absolute-form 请求同样核对 URI 与 Host。
-- 本地 TLS 支持 TLS 1.2/1.3，ALPN 为 HTTP/1.1；router 通道强制 TLS 1.3。没有 HTTP/2 或 WebSocket 桥接。
-- 未配置的域名与供应商登录、遥测等非 router API 会失败。CLI 的自动更新、远程工具下载或 MCP 服务需要独立配置其网络，不会被代理偷偷直连。
-- router 尚不提供 `/v1/responses/compact` 和 `/v1/messages/count_tokens`。依赖这些接口的 agent 功能不可用；不要把基本推理协议测试视为所有 agent 功能兼容。
-- router key 不会提供给 agent。teeproxy 删除标准供应商认证、Cookie 和代理认证头，使用自身配置的 router key；额外自定义头仍可能被转发，不要在其内放置其他服务的密钥。
-- teeproxy 不自动重放已发送请求；agent 自身仍可能有重试策略，按其配置控制。
-- 本项目不改变 agent 的模型选择、思考级别、prompt、tools 或 tool_choice。router 的权限与协议检查仍然生效。
+默认不校验本地 API key，能访问监听地址的本机进程均可使用网关。agent 要求填写 key 时可以使用上述占位值。若需单独的本地访问密钥，在 `teeproxy.toml` 设置：
 
-可用 `teeproxy verify --config teeproxy.toml` 单独排查取证。错误 `router_attestation_failed` 表示没有发送业务请求；`router_connection_failed_request_not_replayed` 表示发送阶段失败，执行结果可能未知。流中断后不追加伪造的完成事件。
+```toml
+client_key_env = "TEEPROXY_CLIENT_KEY"
+```
+
+向 teeproxy 提供该环境变量，值为 16–256 个可见 ASCII 字符。将同一个值配置到 agent 的 API key：Codex 用 `TEEPROXY_AGENT_KEY`，Claude Code 用 `ANTHROPIC_API_KEY`。本地 key 与 router key 分离，只在回环连接上使用。支持 `Authorization: Bearer ...`、`x-api-key` 或 `x-goog-api-key`；请求含有多项认证时必须全部匹配。失败返回 401。
+
+## 从 0.1 迁移
+
+0.2 移除了 HTTP CONNECT、本地 CA 和供应商域名映射。重新使用 `teeproxy.example.toml`，保留自己的 router 地址、key 环境变量和批准策略路径。旧的 `ca_dir`、`routes`、`proxy_token_env` 配置会被拒绝；可选认证改用 `client_key_env`，账号池改为顶层 `pool`。
+
+将此前指向 teeproxy 的 HTTP_PROXY/HTTPS_PROXY 设置撤销，并移除仅为旧 teeproxy 设置的 CODEX_CA_CERTIFICATE/NODE_EXTRA_CA_CERTS；其他代理或 CA 设置应按实际用途保留。若已有其他 HTTP 代理，确保 NO_PROXY 包含 `127.0.0.1,localhost,::1`。旧 CA 文件不再被程序读取。
+
+## 兼容范围
+
+本地 HTTP 仅限同一台机器。`https://127.0.0.1` 仍然需要可信服务器证书，当前版本不提供本地 HTTPS 监听。teeproxy → router 始终使用独立 TEE 验证的 TLS 1.3。
+
+请求保持原协议和模型名；不转换 OpenAI 与 Anthropic 格式。当前 router 未实现 `/v1/responses/compact`、`/v1/messages/count_tokens` 或 WebSocket，相关 agent 功能不可用。推理以外的登录、更新、遥测、MCP 等由 agent 自己的网络配置决定。
+
+`router_attestation_failed` 表示没有发送业务请求；`router_connection_failed_request_not_replayed` 表示发送阶段失败，执行结果可能未知。teeproxy 不重放请求；agent 自身仍可能重试。

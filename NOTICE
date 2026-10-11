@@ -1,6 +1,6 @@
 teeproxy includes the independent Rust attestation client developed alongside
-teerouter, adapted into a local HTTP CONNECT proxy with verified connection
-pooling, bounded streaming, local certificates and agent routing.
+teerouter, adapted into a loopback API gateway with verified TLS connection
+pooling, bounded streaming and agent base-URL configuration.
 
 The inherited MIT notice is retained in LICENSE. The teellm protocol domain and
 attestation endpoint names are retained for wire compatibility with teerouter.

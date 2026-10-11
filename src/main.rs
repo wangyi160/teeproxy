@@ -1,15 +1,14 @@
 use anyhow::{Context, Result, ensure};
 use std::path::Path;
-use teeproxy::{ca, client, config::Config, proxy::Proxy};
+use teeproxy::{client, config::Config, proxy::Proxy};
 
-const HELP: &str = "teeproxy 0.1.0
+const HELP: &str = "teeproxy 0.2.0
 
-teeproxy init-ca --dir .teeproxy/ca
 teeproxy verify --config teeproxy.toml
 teeproxy run --config teeproxy.toml
 
-The proxy listens on loopback and verifies the router before sending data.
-Agent HTTPS traffic requires trust in ca.pem. No system trust is installed.
+Set your agent API base URL to http://127.0.0.1:8899/v1.
+The gateway verifies the router before sending data over upstream TLS.
 The router key is read only from the environment named by router_key_env.
 ";
 
@@ -33,16 +32,8 @@ async fn execute() -> Result<()> {
     }
     ensure!(
         args.len() == 3,
-        "Expected a command and its --config/--dir argument; see --help"
+        "Expected a command and its --config argument; see --help"
     );
-    if args[0] == "init-ca" && args[1] == "--dir" {
-        ca::init(Path::new(&args[2]))?;
-        println!(
-            "Local CA created at {}. Trust ca.pem only in your agent process.",
-            args[2]
-        );
-        return Ok(());
-    }
     ensure!(
         matches!(args[0].as_str(), "run" | "verify") && args[1] == "--config",
         "Unknown command; see --help"
@@ -59,22 +50,17 @@ async fn execute() -> Result<()> {
         std::env::var(&config.router_key_env)
             .map_err(|_| anyhow::anyhow!("Required router key environment variable is unset"))?,
     );
-    let proxy_token = config
-        .proxy_token_env
+    let client_key = config
+        .client_key_env
         .as_ref()
         .map(|name| {
             std::env::var(name)
                 .map(zeroize::Zeroizing::new)
-                .map_err(|_| anyhow::anyhow!("Required proxy token environment variable is unset"))
+                .map_err(|_| anyhow::anyhow!("Required client key environment variable is unset"))
         })
         .transpose()?;
     let address = config.listen;
-    let proxy = Proxy::new(
-        config,
-        trust,
-        &key,
-        proxy_token.as_ref().map(|v| v.as_str()),
-    )?;
+    let proxy = Proxy::new(config, trust, &key, client_key.as_ref().map(|v| v.as_str()))?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .context("Cannot bind local proxy")?;
