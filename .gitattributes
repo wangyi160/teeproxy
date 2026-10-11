@@ -1,0 +1,4 @@
+* text=auto eol=lf
+*.der binary
+*.bin binary
+tests/fixtures/tdx/tdx_quote binary

@@ -1,0 +1,32 @@
+listen = "127.0.0.1:8899"
+router = "https://YOUR-APP-8443s.YOUR-CLUSTER.phala.network"
+ca_dir = ".teeproxy/ca"
+router_key_env = "TEEPROXY_ROUTER_KEY"
+# Replace this empty allowlist with an independently reviewed release policy.
+tdx_policy = "policy/tdx-deny-all.json"
+# Optional local proxy authentication (username: teeproxy).
+# proxy_token_env = "TEEPROXY_CLIENT_TOKEN"
+max_in_flight = 16
+max_connections = 128
+stream_idle_secs = 120
+
+[[routes]]
+host = "api.openai.com"
+# pool = "openai"
+
+[[routes]]
+host = "api.anthropic.com"
+# pool = "claude"
+
+[[routes]]
+host = "chatgpt.com"
+prefix = "/backend-api/codex"
+router_prefix = "/v1"
+
+[[routes]]
+host = "generativelanguage.googleapis.com"
+prefix = "/v1beta"
+router_prefix = "/v1beta"
+
+[[routes]]
+host = "api.x.ai"

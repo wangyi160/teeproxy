@@ -1,0 +1,13 @@
+# Merge these sections into your Codex user config; preserve existing settings.
+# Supply HTTP_PROXY/HTTPS_PROXY and CODEX_CA_CERTIFICATE before launching Codex.
+# TEEPROXY_AGENT_KEY is a placeholder; only teeproxy holds the real router key.
+[model_providers.teeproxy]
+name = "teerouter via teeproxy"
+base_url = "https://api.openai.com/v1"
+env_key = "TEEPROXY_AGENT_KEY"
+wire_api = "responses"
+supports_websockets = false
+requires_openai_auth = false
+
+[profiles.teeproxy]
+model_provider = "teeproxy"

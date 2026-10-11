@@ -1,0 +1,8 @@
+/target/
+/.teeproxy/
+/teeproxy.toml
+*.key
+*.log
+.env
+.env.*
+**/__pycache__/

@@ -91,6 +91,8 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
 
+可选 GitHub Actions 配置见 [CI 模板](ci/github-actions.yml)。将其放到 `.github/workflows/ci.yml` 即可启用；提交该路径需要 GitHub 凭证具有 workflow 写权限。
+
 测试覆盖 CONNECT/本地证书、认证隔离、同一 TLS 通道、拒绝未验证证据、SSE、取消和并发、gzip、路径限制，以及公开 Intel/AMD 签名样本的篡改、过期、证书链和发布策略验证。成功通道测试使用仅在 `cfg(test)` 存在的模拟验证入口；发行二进制没有 sample、跳过验证或接受未知发布的选项。
 
 测试不等于已在你的云实例或每一版 agent 上完成实机验收。当前不支持 Responses WebSocket、远程 compaction、Claude token-counting 接口、OAuth 登录转发或任意互联网代理。模型名与请求功能需要 router 本身支持；不会合成不支持接口的成功响应。详情见 [安全边界](docs/SECURITY.md)。
