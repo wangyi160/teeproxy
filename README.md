@@ -10,20 +10,20 @@ agent 通过 base URL 直连本机的 teeproxy。默认入口使用回环 HTTP�
 
 ## Windows 桌面版
 
-双击 `teeproxy.exe` 打开原生 Win32 窗口。在界面填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口、账号池及可选本地 key。
+双击 `teeproxy.exe` 打开原生 Win32 窗口。左侧导航切换概览、模型列表、账号池、连接设置和运行记录，右侧显示当前页面的详情。在连接设置填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口、账号池及可选本地 key。
 
-- **保存配置**：将设置保存到当前 Windows 用户目录，密钥由 Windows DPAPI 加密。
-- **验证上游**：在后台校验真实 router，显示校验结果，不发送业务密钥。
-- **启动网关 / 停止**：控制本地 API 监听；停止会同时关闭现有连接和响应流。
-- **复制地址**：将本地 `/v1` 地址用于 agent 的 base URL。
+- **保存设置**：将设置保存到当前 Windows 用户目录，密钥由 Windows DPAPI 加密。
+- **验证连接**：在后台校验真实 router，显示校验结果，不发送业务密钥。
+- **启动代理 / 停止代理**：右上角按钮控制本地 API 监听；停止会同时关闭现有连接和响应流。
+- **概览**：查看本地 `/v1` 地址、上游地址及模型和账号池数量，点击“复制地址”用于 agent 的 base URL。
 - **模型 / 账号池**：查看当前 key 可访问的模型、上游账号与可用状态，筛选和复制模型 ID，选择下一次启动使用的账号池。刷新前先通过 TEE 验证。
 - **系统托盘**：最小化或关闭窗口后继续转发；点击托盘图标恢复，右键选择“退出 teeproxy”结束程序。
 
 Windows 发行包见 [Releases](https://github.com/wangyi160/teeproxy/releases)。具体操作、配置保存位置和后台行为见 [桌面版说明](docs/DESKTOP.md)。
 
-![Windows 原生连接设置](docs/images/windows-desktop.png)
+![Windows 原生桌面概览](docs/images/windows-overview.png)
 
-[模型页](docs/images/windows-models.png) · [账号池页](docs/images/windows-accounts.png)。截图使用示例地址；连接并刷新后显示当前 key 可访问的真实数据。
+[连接设置](docs/images/windows-desktop.png) · [模型页](docs/images/windows-models.png) · [账号池页](docs/images/windows-accounts.png)。截图使用示例地址；连接并刷新后显示当前 key 可访问的真实数据。
 
 ## 源码构建和命令行
 

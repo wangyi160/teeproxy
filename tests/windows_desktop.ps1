@@ -65,20 +65,14 @@ function Click-Control([int]$Id) {
     [void][TeeproxyUi]::Send($script:window,0x0111,[IntPtr]$Id,[TeeproxyUi]::GetDlgItem($script:window,$Id))
 }
 function Select-Page([int]$Page) {
-    $tabs = [TeeproxyUi]::GetDlgItem($script:window,301)
-    $current = [TeeproxyUi]::Send($tabs,0x130B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32()
-    for ($step=0; $step -lt [Math]::Abs($Page-$current); $step++) {
-        $key = if ($Page -gt $current) { 39 } else { 37 }
-        [void][TeeproxyUi]::Send($tabs,0x0100,[IntPtr]$key,[IntPtr]::Zero)
-    }
-    if ([TeeproxyUi]::Send($tabs,0x130B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne $Page) { throw 'Native tab selection failed' }
+    Click-Control (501 + $Page)
 }
 function Control-Shown([int]$Id) {
     ([TeeproxyUi]::GetStyle([TeeproxyUi]::GetDlgItem($script:window,$Id),-16).ToInt64() -band 0x10000000) -ne 0
 }
 function Open-TestWindow {
     $script:appProcess = Start-Process -FilePath $Binary -ArgumentList @('gui','--settings',('"' + $settingsFile + '"')) -WindowStyle Hidden -PassThru
-    Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,203) -ne [IntPtr]::Zero }
+    Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,110) -ne [IntPtr]::Zero }
 }
 function Close-TestWindow {
     if ($script:appProcess -and -not $script:appProcess.HasExited) {
@@ -88,16 +82,16 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(301,302,303,304,307)) {
+    foreach ($id in @(501,502,503,504,505,302,303,304,307)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
-    Select-Page 0
-    if (-not (Control-Shown 302) -or (Control-Shown 303) -or (Control-Shown 101)) { throw 'Model tab visibility failed' }
     Select-Page 1
-    if (-not (Control-Shown 303) -or (Control-Shown 302)) { throw 'Account tab visibility failed' }
-    Select-Page 3
-    if (-not (Control-Shown 110) -or (Control-Shown 303)) { throw 'Log tab visibility failed' }
+    if (-not (Control-Shown 302) -or (Control-Shown 303) -or (Control-Shown 101)) { throw 'Model tab visibility failed' }
     Select-Page 2
+    if (-not (Control-Shown 303) -or (Control-Shown 302)) { throw 'Account tab visibility failed' }
+    Select-Page 4
+    if (-not (Control-Shown 110) -or (Control-Shown 303)) { throw 'Log tab visibility failed' }
+    Select-Page 3
     Set-Control 101 'https://127.0.0.1:1'
     Set-Control 102 'desktop-smoke-key-not-a-real-credential'
     Set-Control 103 $testPort
@@ -112,7 +106,7 @@ try {
     # Password controls are masked, including after reopening.
     if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,102),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -eq [IntPtr]::Zero) { throw 'Key control is not masked' }
     Click-Control 202
-    Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,203)) }
+    Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,202)) }
     if (-not (Read-Control 110).Contains('failed')) { throw 'Verification failure was not displayed' }
     if ((Read-Control 110).Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key leaked to operation log' }
     Click-Control 307
@@ -140,8 +134,8 @@ try {
         if ([int]$response.StatusCode -ne 502) { throw 'Unverified upstream accepted' }
         $response.Dispose()
     } finally { $client.Dispose(); $handler.Dispose() }
-    Click-Control 204
-    Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,203)) }
+    Click-Control 203
+    Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,202)) }
     $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$testPort)
     $portProbe.Start(); $portProbe.Stop()
     if ((Read-Control 110).Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key leaked to operation log' }
@@ -152,5 +146,5 @@ try {
     Close-TestWindow
     $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$testPort)
     $portProbe.Start(); $portProbe.Stop()
-    'Native desktop smoke passed: tabs, save/reopen, masked key, inventory/verification failure, tray restore/minimize/close, background API, stop/exit listener cleanup'
+    'Native desktop smoke passed: sidebar pages, save/reopen, masked key, inventory/verification failure, tray restore/minimize/close, background API, stop/exit listener cleanup'
 } finally { Close-TestWindow }

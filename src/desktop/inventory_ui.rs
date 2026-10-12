@@ -1,7 +1,6 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 use super::*;
 
-pub(super) const TABS: u16 = 301;
 pub(super) const MODELS: u16 = 302;
 pub(super) const ACCOUNTS: u16 = 303;
 pub(super) const SEARCH: u16 = 304;
@@ -13,8 +12,8 @@ pub(super) const CATALOG_STATUS: u16 = 308;
 impl App {
     pub(super) unsafe fn scale_inventory_columns(&self) {
         for (id, widths) in [
-            (MODELS, &[300, 130, 190, 310][..]),
-            (ACCOUNTS, &[170, 220, 130, 110, 120, 90][..]),
+            (MODELS, &[250, 110, 160, 230][..]),
+            (ACCOUNTS, &[136, 180, 96, 94, 120, 78][..]),
         ] {
             if let Some(hwnd) = self.by_id.get(&id) {
                 for (column, width) in widths.iter().enumerate() {
@@ -29,76 +28,71 @@ impl App {
         }
     }
     pub(super) unsafe fn build_inventory(&mut self) -> Result<()> {
-        self.building_page = None;
-        let tabs = self.add(TABS, WC_TABCONTROLW, "", WS_TABSTOP, [24, 216, -48, 32], 0)?;
-        for (index, label) in ["模型", "账号池", "连接设置", "运行记录"]
-            .into_iter()
-            .enumerate()
-        {
-            let mut label = wide(label);
-            let item = TCITEMW {
-                mask: TCIF_TEXT,
-                pszText: label.as_mut_ptr(),
-                ..mem::zeroed()
-            };
-            SendMessageW(
-                tabs,
-                TCM_INSERTITEMW,
-                index,
-                (&item as *const TCITEMW) as isize,
-            );
-        }
-        self.button(REFRESH, "刷新模型和账号", [512, 164, 156, 34], 0)?;
-        self.add(
-            CATALOG_STATUS,
-            w!("STATIC"),
-            "尚未读取列表",
-            SS_LEFT,
-            [684, 171, -708, 22],
-            2,
-        )?;
-        self.label(
-            "最小化或关闭窗口后留在系统托盘；右键托盘图标可打开、停止或退出。",
-            [24, -32, -48, 22],
-            2,
-        )?;
-        self.building_page = Some(0);
-        self.label("筛选模型", [24, 271, 76, 24], 0)?;
+        self.building_page = Some(MODEL_PAGE);
         self.edit(
             SEARCH,
             "",
-            [104, 267, 360, 30],
+            [244, 130, -568, 36],
             0,
-            "模型 ID、供应商或账号池",
+            "搜索模型、供应商或账号池",
         )?;
-        self.button(COPY_MODEL, "复制模型 ID", [-160, 267, 136, 30], 0)?;
+        self.button(COPY_MODEL, "复制模型 ID", [-308, 130, 136, 36], 0)?;
         self.table(
             MODELS,
             &[
-                ("模型 ID", 300),
-                ("供应商", 130),
-                ("账号池", 190),
-                ("接口", 310),
+                ("模型 ID", 250),
+                ("供应商", 110),
+                ("账号池", 160),
+                ("接口", 230),
             ],
         )?;
-        self.building_page = Some(1);
-        self.label(
-            "当前 key 可访问的上游账号；状态来自 router。",
-            [24, 271, -230, 24],
+        let empty = self.add(
+            MODELS_EMPTY,
+            w!("STATIC"),
+            "尚未加载模型\r\n\r\n请先完成连接设置，然后点击刷新列表。",
+            windows_sys::Win32::System::SystemServices::SS_CENTER,
+            [284, 332, -360, 100],
             0,
         )?;
-        self.button(USE_POOL, "使用所选账号池", [-188, 267, 164, 30], 0)?;
+        SetWindowPos(
+            empty,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        self.building_page = Some(ACCOUNT_PAGE);
+        self.button(USE_POOL, "使用所选账号池", [244, 130, 168, 36], 0)?;
         self.table(
             ACCOUNTS,
             &[
-                ("账号池", 170),
-                ("账号", 220),
-                ("供应商", 130),
-                ("状态", 110),
+                ("账号池", 136),
+                ("账号", 180),
+                ("供应商", 96),
+                ("状态", 94),
                 ("模型目录", 120),
-                ("模型数", 90),
+                ("模型数", 78),
             ],
         )?;
+        let empty = self.add(
+            ACCOUNTS_EMPTY,
+            w!("STATIC"),
+            "尚未加载账号池\r\n\r\n验证连接后，可查看上游账号及可用状态。",
+            windows_sys::Win32::System::SystemServices::SS_CENTER,
+            [284, 332, -360, 100],
+            0,
+        )?;
+        SetWindowPos(
+            empty,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
         self.building_page = None;
         Ok(())
     }
@@ -107,16 +101,17 @@ impl App {
             id,
             WC_LISTVIEWW,
             "",
-            WS_TABSTOP | WS_BORDER | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            [24, 312, -48, -364],
+            WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+            [260, 198, -312, -300],
             0,
         )?;
         SendMessageW(
             hwnd,
             LVM_SETEXTENDEDLISTVIEWSTYLE,
             0,
-            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_GRIDLINES) as isize,
+            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
         );
+        SetWindowTheme(hwnd, w!("Explorer"), ptr::null());
         for (index, (label, width)) in columns.iter().enumerate() {
             let mut label = wide(label);
             let column = LVCOLUMNW {
@@ -134,23 +129,6 @@ impl App {
             );
         }
         Ok(())
-    }
-    pub(super) unsafe fn select_page(&mut self, page: usize) {
-        self.page = page.min(3);
-        SendMessageW(self.by_id[&TABS], TCM_SETCURSEL, self.page, 0);
-        for control in &self.controls {
-            ShowWindow(
-                control.hwnd,
-                if control.page.is_none_or(|p| p == self.page) {
-                    SW_SHOW
-                } else {
-                    SW_HIDE
-                },
-            );
-        }
-        self.layout();
-        // Tab navigation remains restricted to the visible page's native controls.
-        SetFocus(self.by_id[&TABS]);
     }
     pub(super) unsafe fn render_catalog(&mut self) {
         let filter = self.text(SEARCH).to_lowercase();
@@ -196,9 +174,28 @@ impl App {
             })
             .collect::<Vec<_>>();
         fill(self.by_id[&ACCOUNTS], &accounts);
+        self.set(
+            MODELS_EMPTY,
+            if self.catalog_loaded {
+                "没有匹配的模型\r\n\r\n调整搜索条件，或刷新当前可访问的模型。"
+            } else {
+                "尚未加载模型\r\n\r\n请先完成连接设置，然后点击刷新列表。"
+            },
+        );
+        self.set(
+            ACCOUNTS_EMPTY,
+            if self.catalog_loaded {
+                "没有可见的账号池\r\n\r\n当前业务密钥没有可显示的上游账号。"
+            } else {
+                "尚未加载账号池\r\n\r\n验证连接后，可查看上游账号及可用状态。"
+            },
+        );
+        self.update_summary();
+        self.update_visibility();
     }
     pub(super) unsafe fn invalidate_catalog(&mut self) {
         self.catalog = Default::default();
+        self.catalog_loaded = false;
         self.render_catalog();
         self.set(CATALOG_STATUS, "配置已修改 · 请刷新列表");
     }
@@ -250,7 +247,7 @@ impl App {
                 self.append(&format!(
                     "已选择账号池 {pool}；下次启动生效，保存配置可长期保留。"
                 ));
-                self.select_page(2);
+                self.select_page(SETTINGS_PAGE);
             }
             _ => {}
         }
@@ -351,7 +348,7 @@ mod tests {
                 state.refresh_fonts();
                 assert_eq!(
                     SendMessageW(state.by_id[&MODELS], LVM_GETCOLUMNWIDTH, 0, 0),
-                    450
+                    375
                 );
                 state.dpi = 96;
                 state.refresh_fonts();
@@ -391,7 +388,7 @@ mod tests {
                 );
                 state.inventory_action(USE_POOL).unwrap();
                 assert_eq!(state.text(POOL), "pool-b");
-                assert_eq!(state.page, 2);
+                assert_eq!(state.page, SETTINGS_PAGE);
                 let stale_catalog = mem::take(&mut state.catalog);
                 state.invalidate_catalog();
                 state.inventory_generation = 10;
