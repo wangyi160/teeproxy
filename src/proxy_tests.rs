@@ -170,6 +170,69 @@ fn agent() -> reqwest::Client {
         .unwrap()
 }
 
+#[tokio::test]
+async fn merchant_credentials_use_the_attested_connection_and_cannot_reach_admin() {
+    let upstream = upstream("teeproxy-unit-test", "normal").await;
+    let trust = Trust {
+        allow_test_evidence: true,
+        ..Trust::default()
+    };
+    let mut session = verify(&upstream.running.url, &trust).await.session.unwrap();
+    let response = session
+        .send_merchant(
+            "GET",
+            "/merchant/state",
+            "merchant-owned-token",
+            b"null".to_vec(),
+        )
+        .await
+        .unwrap();
+    to_bytes(Body::new(response.into_body()), MAX_BODY)
+        .await
+        .unwrap();
+    assert!(
+        session
+            .send_merchant("GET", "/admin/checkpoint", "merchant-owned-token", vec![])
+            .await
+            .is_err()
+    );
+    assert!(
+        session
+            .send_merchant(
+                "GET",
+                "https://other.invalid/merchant/state",
+                "merchant-owned-token",
+                vec![]
+            )
+            .await
+            .is_err()
+    );
+    let calls = upstream.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].path, "/merchant/state");
+    assert_eq!(
+        calls[0].headers["authorization"],
+        "Bearer merchant-owned-token"
+    );
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn failed_attestation_cannot_create_a_merchant_session() {
+    let upstream = upstream("teeproxy-unit-test", "bad-binding").await;
+    let trust = Trust {
+        allow_test_evidence: true,
+        ..Trust::default()
+    };
+    assert!(
+        verify(&upstream.running.url, &trust)
+            .await
+            .session
+            .is_none()
+    );
+    assert!(upstream.calls.lock().unwrap().is_empty());
+}
+
 #[cfg(windows)]
 #[tokio::test]
 async fn desktop_inventory_reads_models_and_accounts_on_one_attested_connection() {

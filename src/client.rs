@@ -154,19 +154,51 @@ impl VerifiedSession {
     /// Send unmodified bytes and caller headers on this exact attested channel.
     pub async fn send_request(
         &mut self,
-        mut request: Request<Full<Bytes>>,
+        request: Request<Full<Bytes>>,
     ) -> Result<Response<Incoming>> {
-        use hyper::body::Body;
         ensure!(
             allowed_api(request.method().as_str(), request.uri().path()),
             "Unsupported router API"
         );
+        self.send_verified(request, MAX_BODY).await
+    }
+
+    /// Private merchant transport only; the public loopback gateway never calls this.
+    pub async fn send_merchant(
+        &mut self,
+        method: &str,
+        path: &str,
+        token: &str,
+        body: Vec<u8>,
+    ) -> Result<Response<Incoming>> {
+        let uri: hyper::Uri = path.parse()?;
+        ensure!(
+            uri.scheme().is_none()
+                && uri.authority().is_none()
+                && crate::merchant_transport::allowed(method, uri.path()),
+            "Unsupported merchant API"
+        );
+        let request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Full::new(Bytes::from(body)))?;
+        self.send_verified(request, 16 * 1024 * 1024).await
+    }
+
+    async fn send_verified(
+        &mut self,
+        mut request: Request<Full<Bytes>>,
+        limit: usize,
+    ) -> Result<Response<Incoming>> {
+        use hyper::body::Body;
         ensure!(
             request
                 .body()
                 .size_hint()
                 .upper()
-                .is_some_and(|n| n <= MAX_BODY as u64),
+                .is_some_and(|n| n <= limit as u64),
             "Request too large"
         );
         request

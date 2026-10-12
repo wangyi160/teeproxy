@@ -1,5 +1,7 @@
 # teeproxy
 
+商户管理程序可使用 `teeproxy merchant-transport --config PATH` 复用同一 TEE 验证器。该模式只接收私有 stdin/stdout JSON 管道，允许 `/merchant/*` 的有限管理接口，不开放本地商户 HTTP 代理，也不允许平台 `/admin/*`。证明及当前 TLS 绑定通过后，才在该连接发送商户凭证。用户桌面模式和本地 agent API 地址保持原样。使用方法见 [teerouter 多商户文档](https://github.com/wangyi160/teerouter/blob/main/docs/MERCHANTS.md)。
+
 给 Codex、Claude Code 等 agent 提供一个本地 API 地址。teeproxy 独立验证 [teerouter](https://github.com/wangyi160/teerouter) 的硬件证明、批准的软件发布和 TLS 绑定，通过之后才向 router 发送密钥和业务请求。
 
 ```text

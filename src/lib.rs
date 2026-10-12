@@ -3,6 +3,7 @@ pub mod client;
 pub mod config;
 #[cfg(windows)]
 pub mod desktop;
+pub mod merchant_transport;
 pub mod protocol;
 pub mod proxy;
 #[cfg(feature = "snp-verifier")]

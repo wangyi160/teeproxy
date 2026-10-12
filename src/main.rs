@@ -3,13 +3,14 @@ use anyhow::{Context, Result, ensure};
 use std::path::Path;
 use teeproxy::{client, config::Config, proxy::Proxy};
 
-const HELP: &str = "teeproxy 0.5.0
+const HELP: &str = "teeproxy 0.6.0
 
 teeproxy                         Windows native GUI
 teeproxy gui [--settings PATH]  Windows native GUI with a separate profile
 
 teeproxy verify --config teeproxy.toml
 teeproxy run --config teeproxy.toml
+teeproxy merchant-transport --config teeproxy.toml
 
 Set your agent API base URL to http://127.0.0.1:8899/v1.
 The gateway verifies the router before sending data over upstream TLS.
@@ -78,11 +79,15 @@ async fn execute() -> Result<()> {
         "Expected a command and its --config argument; see --help"
     );
     ensure!(
-        matches!(args[0].as_str(), "run" | "verify") && args[1] == "--config",
+        matches!(args[0].as_str(), "run" | "verify" | "merchant-transport")
+            && args[1] == "--config",
         "Unknown command; see --help"
     );
     let config = Config::load(Path::new(&args[2]))?;
     let trust = config.trust()?;
+    if args[0] == "merchant-transport" {
+        return teeproxy::merchant_transport::run(&config.router, &trust).await;
+    }
     if args[0] == "verify" {
         let attempt = client::verify(&config.router, &trust).await;
         println!("{}", serde_json::to_string_pretty(&attempt.report)?);

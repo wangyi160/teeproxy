@@ -111,7 +111,13 @@ pub fn allowed_api(method: &str, path: &str) -> bool {
         (method, path),
         (
             "GET",
-            "/v1/models" | "/v1/pools" | "/v1/usage" | "/health/live" | "/health/ready"
+            "/v1/models"
+                | "/v1/pools"
+                | "/v1/usage"
+                | "/v1/identity"
+                | "/v1/merchants"
+                | "/health/live"
+                | "/health/ready"
         ) | (
             "POST",
             "/v1/chat/completions" | "/v1/responses" | "/v1/messages"
