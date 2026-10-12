@@ -19,6 +19,9 @@ pub(crate) struct Model {
 }
 pub(crate) struct Account {
     pub pool: String,
+    pub pool_name: String,
+    pub merchant: String,
+    pub multiplier: String,
     pub id: String,
     pub provider: String,
     pub state: String,
@@ -86,6 +89,21 @@ fn provider(value: &Value) -> String {
         _ => text(value),
     }
 }
+fn multiplier(value: &Value) -> String {
+    let Some(n) = value.as_u64().filter(|n| *n <= 1_000_000_000_000_000) else {
+        return "未设置".into();
+    };
+    let whole = n / 1_000_000;
+    let fraction = n % 1_000_000;
+    if fraction == 0 {
+        format!("{whole}×")
+    } else {
+        format!(
+            "{whole}.{}×",
+            format!("{fraction:06}").trim_end_matches('0')
+        )
+    }
+}
 pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
     let models = models["data"]
         .as_array()
@@ -125,6 +143,12 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
     }
     for pool in pools {
         let name = text(&pool["id"]);
+        let pool_name = match text(&pool["pool_name"]) {
+            s if s.is_empty() => name.clone(),
+            s => s,
+        };
+        let merchant = text(&pool["merchant_name"]);
+        let rate = multiplier(&pool["multiplier_millionths"]);
         ensure!(!name.is_empty(), "账号池目录缺少 ID");
         let accounts = pool["accounts"]
             .as_array()
@@ -136,6 +160,9 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
         if accounts.is_empty() {
             result.accounts.push(Account {
                 pool: name.clone(),
+                pool_name: pool_name.clone(),
+                merchant: merchant.clone(),
+                multiplier: rate.clone(),
                 id: "（空池）".into(),
                 provider: provider(&pool["provider"]),
                 state: "无账号".into(),
@@ -166,6 +193,9 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             };
             result.accounts.push(Account {
                 pool: name.clone(),
+                pool_name: pool_name.clone(),
+                merchant: merchant.clone(),
+                multiplier: rate.clone(),
                 id,
                 provider: provider(&account["provider"]),
                 state: state.into(),
@@ -187,6 +217,28 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn pool_multiplier_is_exact_and_missing_is_not_assumed_to_be_one() {
+        for (value, expected) in [
+            (json!(20000), "0.02×"),
+            (json!(200000), "0.2×"),
+            (json!(1000000), "1×"),
+            (json!(1), "0.000001×"),
+            (json!(0), "0×"),
+            (json!(1000000000000000u64), "1000000000×"),
+            (Value::Null, "未设置"),
+            (json!(-1), "未设置"),
+            (json!(0.2), "未设置"),
+        ] {
+            assert_eq!(multiplier(&value), expected);
+        }
+        let catalog = parse(&json!({"data":[]}), &json!({"data":[{"id":"m_id.pool","pool_name":"pool","merchant_name":"Shop","multiplier_millionths":200000,"accounts":[]}]})).unwrap();
+        let row = &catalog.accounts[0];
+        assert_eq!(row.pool, "m_id.pool");
+        assert_eq!(row.pool_name, "pool");
+        assert_eq!(row.merchant, "Shop");
+        assert_eq!(row.multiplier, "0.2×");
+    }
     #[test]
     fn inventory_uses_public_fields_and_preserves_unavailable_accounts_and_empty_pools() {
         let catalog = parse(&json!({"data":[{"id":"model-a","router_pools":["p"],"router_capabilities":[{"provider":"openai","protocols":["responses"]}]}]}),

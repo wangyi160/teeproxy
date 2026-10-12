@@ -13,7 +13,7 @@ impl App {
     pub(super) unsafe fn scale_inventory_columns(&self) {
         for (id, widths) in [
             (MODELS, &[250, 110, 160, 230][..]),
-            (ACCOUNTS, &[136, 180, 96, 94, 120, 78][..]),
+            (ACCOUNTS, &[108, 112, 112, 145, 96, 82, 94, 66][..]),
         ] {
             if let Some(hwnd) = self.by_id.get(&id) {
                 for (column, width) in widths.iter().enumerate() {
@@ -68,12 +68,14 @@ impl App {
         self.table(
             ACCOUNTS,
             &[
-                ("账号池", 136),
-                ("账号", 180),
+                ("账号池", 108),
+                ("价格倍率", 112),
+                ("商户", 112),
+                ("账号", 145),
                 ("供应商", 96),
-                ("状态", 94),
-                ("模型目录", 120),
-                ("模型数", 78),
+                ("状态", 82),
+                ("模型目录", 94),
+                ("模型数", 66),
             ],
         )?;
         let empty = self.add(
@@ -164,7 +166,9 @@ impl App {
             .iter()
             .map(|a| {
                 vec![
-                    a.pool.as_str(),
+                    a.pool_name.as_str(),
+                    a.multiplier.as_str(),
+                    a.merchant.as_str(),
                     a.id.as_str(),
                     a.provider.as_str(),
                     a.state.as_str(),
