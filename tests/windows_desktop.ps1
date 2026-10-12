@@ -15,6 +15,8 @@ public static class TeeproxyUi {
     [DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SendMessageW")] public static extern IntPtr SetText(IntPtr hwnd, uint message, IntPtr wp, string text);
     [DllImport("user32.dll", EntryPoint="SendMessageW")] public static extern IntPtr Send(IntPtr hwnd, uint message, IntPtr wp, IntPtr lp);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
+    [DllImport("user32.dll", EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetStyle(IntPtr hwnd, int index);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd, uint message, IntPtr wp, IntPtr lp);
     public static IntPtr Find(uint pid) {
         IntPtr result=IntPtr.Zero;
@@ -62,18 +64,40 @@ function Set-Control([int]$Id, [string]$Value) {
 function Click-Control([int]$Id) {
     [void][TeeproxyUi]::Send($script:window,0x0111,[IntPtr]$Id,[TeeproxyUi]::GetDlgItem($script:window,$Id))
 }
+function Select-Page([int]$Page) {
+    $tabs = [TeeproxyUi]::GetDlgItem($script:window,301)
+    $current = [TeeproxyUi]::Send($tabs,0x130B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32()
+    for ($step=0; $step -lt [Math]::Abs($Page-$current); $step++) {
+        $key = if ($Page -gt $current) { 39 } else { 37 }
+        [void][TeeproxyUi]::Send($tabs,0x0100,[IntPtr]$key,[IntPtr]::Zero)
+    }
+    if ([TeeproxyUi]::Send($tabs,0x130B,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne $Page) { throw 'Native tab selection failed' }
+}
+function Control-Shown([int]$Id) {
+    ([TeeproxyUi]::GetStyle([TeeproxyUi]::GetDlgItem($script:window,$Id),-16).ToInt64() -band 0x10000000) -ne 0
+}
 function Open-TestWindow {
     $script:appProcess = Start-Process -FilePath $Binary -ArgumentList @('gui','--settings',('"' + $settingsFile + '"')) -WindowStyle Hidden -PassThru
     Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,203) -ne [IntPtr]::Zero }
 }
 function Close-TestWindow {
     if ($script:appProcess -and -not $script:appProcess.HasExited) {
-        [void][TeeproxyUi]::PostMessage($script:window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)
+        [void][TeeproxyUi]::PostMessage($script:window,0x0111,[IntPtr]403,[IntPtr]::Zero)
         if (-not $script:appProcess.WaitForExit(5000)) { throw 'Desktop failed to close' }
     }
 }
 try {
     Open-TestWindow
+    foreach ($id in @(301,302,303,304,307)) {
+        if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
+    }
+    Select-Page 0
+    if (-not (Control-Shown 302) -or (Control-Shown 303) -or (Control-Shown 101)) { throw 'Model tab visibility failed' }
+    Select-Page 1
+    if (-not (Control-Shown 303) -or (Control-Shown 302)) { throw 'Account tab visibility failed' }
+    Select-Page 3
+    if (-not (Control-Shown 110) -or (Control-Shown 303)) { throw 'Log tab visibility failed' }
+    Select-Page 2
     Set-Control 101 'https://127.0.0.1:1'
     Set-Control 102 'desktop-smoke-key-not-a-real-credential'
     Set-Control 103 $testPort
@@ -91,9 +115,23 @@ try {
     Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,203)) }
     if (-not (Read-Control 110).Contains('failed')) { throw 'Verification failure was not displayed' }
     if ((Read-Control 110).Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key leaked to operation log' }
+    Click-Control 307
+    Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,307)) }
+    if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,302),0x1004,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]::Zero) { throw 'Unverified inventory displayed' }
     Click-Control 203
     Wait-Until { (Read-Control 110).Contains("http://127.0.0.1:$testPort/v1") }
     if ([TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,101))) { throw 'Upstream editable while running' }
+    # Exercise the actual notification-area callback, minimize, and close behavior.
+    [void][TeeproxyUi]::Send($script:window,0x8011,[IntPtr]::Zero,[IntPtr]0x0400)
+    Wait-Until { [TeeproxyUi]::IsWindowVisible($script:window) }
+    [void][TeeproxyUi]::Send($script:window,0x0112,[IntPtr]0xF020,[IntPtr]::Zero)
+    Wait-Until { -not [TeeproxyUi]::IsWindowVisible($script:window) }
+    if ($script:appProcess.HasExited) { throw 'Minimizing exited the gateway' }
+    Click-Control 401
+    Wait-Until { [TeeproxyUi]::IsWindowVisible($script:window) }
+    [void][TeeproxyUi]::Send($script:window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)
+    Wait-Until { -not [TeeproxyUi]::IsWindowVisible($script:window) }
+    if ($script:appProcess.HasExited) { throw 'Closing the window exited the gateway' }
     Add-Type -AssemblyName System.Net.Http
     $handler = [Net.Http.HttpClientHandler]::new(); $handler.UseProxy=$false
     $client = [Net.Http.HttpClient]::new($handler)
@@ -108,5 +146,11 @@ try {
     $portProbe.Start(); $portProbe.Stop()
     if ((Read-Control 110).Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key leaked to operation log' }
     Close-TestWindow
-    'Native desktop smoke passed: save/reopen, masked key, verification failure, start/stop, closed listener'
+    Open-TestWindow
+    Click-Control 203
+    Wait-Until { (Read-Control 110).Contains("http://127.0.0.1:$testPort/v1") }
+    Close-TestWindow
+    $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$testPort)
+    $portProbe.Start(); $portProbe.Stop()
+    'Native desktop smoke passed: tabs, save/reopen, masked key, inventory/verification failure, tray restore/minimize/close, background API, stop/exit listener cleanup'
 } finally { Close-TestWindow }

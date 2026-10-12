@@ -89,6 +89,19 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                     return Ok::<_, Infallible>(Response::new(Body::from(value.to_string())));
                                 }
                                 captured.lock().unwrap().push(Captured { path: parts.uri.to_string(), headers: parts.headers, body: bytes });
+                                if response_mode == "catalog" || response_mode == "catalog-denied" {
+                                    if response_mode == "catalog-denied" && parts.uri.path() == "/v1/pools" {
+                                        let mut response = Response::new(Body::from("DO_NOT_DISPLAY_SERVER_BODY"));
+                                        *response.status_mut() = hyper::StatusCode::FORBIDDEN;
+                                        return Ok(response);
+                                    }
+                                    let body = match parts.uri.path() {
+                                        "/v1/models" => json!({"data":[{"id":"model-a", "router_pools":["pool-a"], "router_capabilities":[{"provider":"openai", "protocols":["responses"]}]}]}),
+                                        "/v1/pools" => json!({"data":[{"id":"pool-a", "accounts":[{"id":"account-a", "provider":"openai", "enabled":true, "available":true, "catalog":{"state":"fetched", "visible_models":1}}]}]}),
+                                        _ => panic!("unexpected inventory path"),
+                                    };
+                                    return Ok(Response::new(Body::from(body.to_string())));
+                                }
                                 let body = if response_mode == "stream" || response_mode == "stall" {
                                     Body::from_stream(futures_util::stream::unfold(0, move |state| async move {
                                         match state {
@@ -155,6 +168,76 @@ fn agent() -> reqwest::Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn desktop_inventory_reads_models_and_accounts_on_one_attested_connection() {
+    let upstream = upstream("teeproxy-unit-test", "catalog").await;
+    let trust = Trust {
+        allow_test_evidence: true,
+        ..Trust::default()
+    };
+    let catalog = crate::desktop::catalog::fetch_verified(
+        &upstream.running.url,
+        &trust,
+        "inventory-business-key",
+    )
+    .await
+    .unwrap();
+    assert_eq!(catalog.models[0].id, "model-a");
+    assert_eq!(catalog.accounts[0].id, "account-a");
+    assert_eq!(catalog.accounts[0].state, "可用");
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 1);
+    let calls = upstream.calls.lock().unwrap();
+    assert_eq!(
+        calls.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(),
+        ["/v1/models", "/v1/pools"]
+    );
+    for call in calls.iter() {
+        assert_eq!(
+            call.headers["authorization"],
+            "Bearer inventory-business-key"
+        );
+        assert!(call.body.is_empty());
+        assert!(!call.headers.contains_key("x-router-pool"));
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn desktop_inventory_rejects_bad_trust_and_does_not_expose_error_bodies() {
+    for (kind, mode, allow_test) in [
+        ("sample", "catalog", false),
+        ("teeproxy-unit-test", "bad-binding", true),
+    ] {
+        let upstream = upstream(kind, mode).await;
+        let trust = Trust {
+            allow_test_evidence: allow_test,
+            ..Trust::default()
+        };
+        assert!(
+            crate::desktop::catalog::fetch_verified(
+                &upstream.running.url,
+                &trust,
+                "never-send-this-key"
+            )
+            .await
+            .is_err()
+        );
+        assert!(upstream.calls.lock().unwrap().is_empty());
+    }
+    let upstream = upstream("teeproxy-unit-test", "catalog-denied").await;
+    let trust = Trust {
+        allow_test_evidence: true,
+        ..Trust::default()
+    };
+    let result =
+        crate::desktop::catalog::fetch_verified(&upstream.running.url, &trust, "business-key")
+            .await;
+    let error = result.err().unwrap().to_string();
+    assert!(error.contains("403"));
+    assert!(!error.contains("DO_NOT_DISPLAY_SERVER_BODY"));
 }
 
 #[tokio::test]

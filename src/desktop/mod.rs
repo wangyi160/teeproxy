@@ -1,7 +1,11 @@
 //! Native Win32 frontend. All HWNDs and UI state stay on the message-loop thread.
 //! Workers send owned messages; no window pointer crosses a thread boundary.
 #![allow(unsafe_op_in_unsafe_fn)]
+pub(crate) mod catalog;
+mod inventory_ui;
 pub mod settings;
+mod tray;
+use inventory_ui::*;
 
 use crate::{client, proxy::Proxy};
 use anyhow::{Context, Result, ensure};
@@ -52,11 +56,13 @@ enum Event {
     Verified(u64, bool, Vec<String>),
     Failed(u64, String),
     Stopped(u64),
+    Inventory(u64, std::result::Result<catalog::Catalog, String>),
 }
 struct Control {
     hwnd: HWND,
     rect: [i32; 4],
     font: usize,
+    page: Option<usize>,
 }
 struct App {
     hwnd: HWND,
@@ -76,42 +82,64 @@ struct App {
     running: bool,
     status_color: u32,
     log: Vec<String>,
+    building_page: Option<usize>,
+    page: usize,
+    catalog: catalog::Catalog,
+    model_rows: Vec<usize>,
+    inventory_task: Option<JoinHandle<()>>,
+    inventory_generation: u64,
+    inventory_finished_observed: bool,
+    tray: Option<tray::Tray>,
+}
+
+impl App {
+    fn new(path: PathBuf) -> Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        let (sender, receiver) = mpsc::channel();
+        Ok(Self {
+            hwnd: ptr::null_mut(),
+            controls: Vec::new(),
+            by_id: HashMap::new(),
+            fonts: [ptr::null_mut(); 3],
+            dpi: 96,
+            path,
+            runtime,
+            sender,
+            receiver,
+            task: None,
+            shutdown: None,
+            stopping: false,
+            finished_observed: false,
+            generation: 0,
+            running: false,
+            status_color: rgb(90, 99, 112),
+            log: Vec::new(),
+            building_page: None,
+            page: 2,
+            catalog: Default::default(),
+            model_rows: Vec::new(),
+            inventory_task: None,
+            inventory_generation: 0,
+            inventory_finished_observed: false,
+            tray: None,
+        })
+    }
 }
 
 pub fn run(path: Option<PathBuf>) -> Result<()> {
     let path = path.map(Ok).unwrap_or_else(settings::default_path)?;
     let path = std::path::absolute(path)?;
     let loaded = settings::load(&path);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    let (sender, receiver) = mpsc::channel();
-    let app = RefCell::new(App {
-        hwnd: ptr::null_mut(),
-        controls: Vec::new(),
-        by_id: HashMap::new(),
-        fonts: [ptr::null_mut(); 3],
-        dpi: 96,
-        path,
-        runtime,
-        sender,
-        receiver,
-        task: None,
-        shutdown: None,
-        stopping: false,
-        finished_observed: false,
-        generation: 0,
-        running: false,
-        status_color: rgb(90, 99, 112),
-        log: Vec::new(),
-    });
+    let app = RefCell::new(App::new(path)?);
     // The RefCell outlives the window and is accessed only on this UI thread.
     // try_borrow_mut in wndproc also handles synchronous Win32 reentrancy.
     unsafe {
         let instance = GetModuleHandleW(ptr::null());
         let controls = INITCOMMONCONTROLSEX {
             dwSize: mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES,
         };
         InitCommonControlsEx(&controls);
         let class = WNDCLASSW {
@@ -172,6 +200,10 @@ pub fn run(path: Option<PathBuf>) -> Result<()> {
     if let Some(task) = app.task.take() {
         task.abort();
     }
+    if let Some(task) = app.inventory_task.take() {
+        task.abort();
+    }
+    app.tray.take();
     unsafe {
         for font in app.fonts {
             if !font.is_null() {
@@ -209,7 +241,12 @@ impl App {
             ptr::null(),
         );
         ensure!(!hwnd.is_null(), "无法创建桌面控件");
-        self.controls.push(Control { hwnd, rect, font });
+        self.controls.push(Control {
+            hwnd,
+            rect,
+            font,
+            page: self.building_page,
+        });
         if id != 0 {
             self.by_id.insert(id, hwnd);
         }
@@ -286,86 +323,88 @@ impl App {
             "",
         )?;
         self.button(COPY, "复制地址", [-120, 119, 96, 30], 0)?;
-        self.label("上游连接", [24, 167, 600, 25], 0)?;
-        self.label("Router 地址", [24, 207, 132, 24], 0)?;
+        self.build_inventory()?;
+        self.building_page = Some(2);
+        self.label("Router 地址", [24, 263, 132, 24], 0)?;
         self.edit(
             ROUTER,
             &profile.router,
-            [160, 202, -184, 30],
+            [160, 258, -184, 30],
             0,
             "https://your-router.example.com:8443",
         )?;
-        self.label("Router key", [24, 247, 132, 24], 0)?;
+        self.label("Router key", [24, 303, 132, 24], 0)?;
         self.edit(
             ROUTER_KEY,
             &secrets.router_key,
-            [160, 242, -296, 30],
+            [160, 298, -296, 30],
             ES_PASSWORD as u32,
             "上游 router 的业务密钥",
         )?;
         self.button(
             SHOW_KEYS,
             "显示密钥",
-            [-128, 245, 104, 26],
+            [-128, 301, 104, 26],
             BS_AUTOCHECKBOX as u32,
         )?;
-        self.label("本地端口", [24, 287, 132, 24], 0)?;
+        self.label("本地端口", [24, 343, 132, 24], 0)?;
         self.edit(
             PORT,
             &profile.port.to_string(),
-            [160, 282, 100, 30],
+            [160, 338, 100, 30],
             ES_NUMBER as u32,
             "8899",
         )?;
-        self.label("账号池（可选）", [286, 287, 125, 24], 0)?;
+        self.label("账号池（可选）", [286, 343, 125, 24], 0)?;
         self.edit(
             POOL,
             &profile.pool,
-            [420, 282, -444, 30],
+            [420, 338, -444, 30],
             0,
             "使用 router 默认池",
         )?;
-        self.label("TDX 批准策略", [24, 327, 132, 24], 0)?;
+        self.label("TDX 批准策略", [24, 383, 132, 24], 0)?;
         self.edit(
             TDX,
             &profile.tdx_policy,
-            [160, 322, -284, 30],
+            [160, 378, -284, 30],
             0,
             "选择审核后的 JSON 策略",
         )?;
-        self.button(BROWSE_TDX, "选择…", [-120, 322, 96, 30], 0)?;
-        self.label("SNP 批准策略", [24, 367, 132, 24], 0)?;
+        self.button(BROWSE_TDX, "选择…", [-120, 378, 96, 30], 0)?;
+        self.label("SNP 批准策略", [24, 423, 132, 24], 0)?;
         self.edit(
             SNP,
             &profile.snp_policy,
-            [160, 362, -284, 30],
+            [160, 418, -284, 30],
             0,
             "使用 AMD SEV-SNP 时填写",
         )?;
-        self.button(BROWSE_SNP, "选择…", [-120, 362, 96, 30], 0)?;
-        self.label("本地 key（可选）", [24, 407, 132, 24], 0)?;
+        self.button(BROWSE_SNP, "选择…", [-120, 418, 96, 30], 0)?;
+        self.label("本地 key（可选）", [24, 463, 132, 24], 0)?;
         self.edit(
             CLIENT_KEY,
             &secrets.client_key,
-            [160, 402, -184, 30],
+            [160, 458, -184, 30],
             ES_PASSWORD as u32,
             "留空则本机请求无需密钥；设置后同步填入 agent",
         )?;
         self.label(
             "密钥通过 Windows 用户加密保存。运行时配置锁定；修改上游前请先停止。",
-            [160, 439, -184, 24],
+            [160, 495, -184, 24],
             2,
         )?;
-        self.button(SAVE, "保存配置", [24, 480, 116, 34], 0)?;
-        self.button(VERIFY, "验证上游", [152, 480, 116, 34], 0)?;
+        self.building_page = None;
+        self.button(SAVE, "保存配置", [24, 164, 110, 34], 0)?;
+        self.button(VERIFY, "验证上游", [146, 164, 110, 34], 0)?;
         self.button(
             START,
             "启动网关",
-            [280, 480, 116, 34],
+            [268, 164, 110, 34],
             BS_DEFPUSHBUTTON as u32,
         )?;
-        self.button(STOP, "停止", [408, 480, 100, 34], 0)?;
-        self.label("运行记录", [24, 531, 500, 24], 0)?;
+        self.button(STOP, "停止", [390, 164, 110, 34], 0)?;
+        self.building_page = Some(3);
         self.add(
             LOG,
             w!("EDIT"),
@@ -376,15 +415,16 @@ impl App {
                 | ES_MULTILINE as u32
                 | ES_AUTOVSCROLL as u32
                 | ES_READONLY as u32,
-            [24, 558, -48, -578],
+            [24, 264, -48, -312],
             2,
         )?;
+        self.building_page = None;
         self.refresh_fonts();
         let mut rect = RECT {
             left: 0,
             top: 0,
-            right: self.scale(840),
-            bottom: self.scale(700),
+            right: self.scale(1020),
+            bottom: self.scale(720),
         };
         AdjustWindowRectExForDpi(
             &mut rect,
@@ -404,6 +444,11 @@ impl App {
         );
         self.layout();
         self.busy(false);
+        self.select_page(if profile.router.is_empty() { 2 } else { 0 });
+        self.tray = Some(tray::Tray::new(self.hwnd));
+        if !self.tray.as_ref().is_some_and(|tray| tray.installed) {
+            self.append("系统托盘注册失败；窗口保持任务栏显示，关闭窗口将退出。");
+        }
         self.append(&format!("配置文件：{}", self.path.display()));
         self.append("填写 HTTPS 上游和批准策略后，验证上游或启动网关。每条业务连接都独立校验。");
         #[cfg(not(feature = "snp-verifier"))]
@@ -413,13 +458,14 @@ impl App {
             self.append(&error);
         }
         SetTimer(self.hwnd, 1, 100, None);
-        SetFocus(self.by_id[&ROUTER]);
+        SetFocus(self.by_id[&TABS]);
         Ok(())
     }
     fn scale(&self, value: i32) -> i32 {
         (value as i64 * self.dpi as i64 / 96) as i32
     }
     unsafe fn refresh_fonts(&mut self) {
+        self.scale_inventory_columns();
         let old = self.fonts;
         for (index, (size, weight)) in [(14, 400), (28, 600), (12, 400)].into_iter().enumerate() {
             self.fonts[index] = CreateFontW(
@@ -463,7 +509,7 @@ impl App {
             MoveWindow(
                 control.hwnd,
                 self.scale(if x < 0 { width + x } else { x }),
-                self.scale(y),
+                self.scale(if y < 0 { height + y } else { y }),
                 self.scale(if w < 0 { width + w } else { w }).max(1),
                 self.scale(if h < 0 { height + h } else { h }).max(1),
                 1,
@@ -482,6 +528,9 @@ impl App {
     }
     unsafe fn status(&mut self, text: &str, color: u32) {
         self.status_color = color;
+        if let Some(tray) = &self.tray {
+            tray.status(text);
+        }
         self.set(STATUS, text);
         InvalidateRect(self.by_id[&STATUS], ptr::null(), 1);
     }
@@ -516,6 +565,14 @@ impl App {
         Ok((profile, secrets))
     }
     unsafe fn busy(&self, value: bool) {
+        let value = value || self.inventory_task.is_some();
+        EnableWindow(
+            self.by_id[&REFRESH],
+            (self.inventory_task.is_none()
+                && !self.stopping
+                && (self.task.is_none() || self.running)) as i32,
+        );
+        EnableWindow(self.by_id[&USE_POOL], (!value) as i32);
         for id in FIELDS {
             EnableWindow(self.by_id[&id], (!value) as i32);
         }
@@ -531,7 +588,7 @@ impl App {
                 settings::save(&self.path, &profile, &secrets)?;
                 self.append("配置已保存，密钥已使用当前 Windows 用户加密。");
             }
-            VERIFY | START if self.task.is_none() => {
+            VERIFY | START if self.task.is_none() && self.inventory_task.is_none() => {
                 let (profile, secrets) = self.snapshot()?;
                 let config = profile.config(&secrets, self.path.parent().unwrap())?;
                 self.generation += 1;
@@ -593,6 +650,16 @@ impl App {
                 }));
             }
             STOP => self.stop(),
+            REFRESH | COPY_MODEL | USE_POOL => self.inventory_action(id)?,
+            tray::OPEN => tray::restore(self.hwnd),
+            tray::TOGGLE => {
+                if self.task.is_some() || self.inventory_task.is_some() {
+                    self.stop();
+                } else {
+                    self.action(START)?;
+                }
+            }
+            tray::EXIT => self.quit(),
             COPY => {
                 copy_text(self.hwnd, &self.text(URL))?;
                 self.append("已复制 Agent API 地址。");
@@ -620,6 +687,12 @@ impl App {
         Ok(())
     }
     unsafe fn stop(&mut self) {
+        if let Some(task) = self.inventory_task.take() {
+            task.abort();
+            self.inventory_generation += 1;
+            self.set(CATALOG_STATUS, "刷新已取消 · 可重新刷新");
+            self.busy(self.task.is_some());
+        }
         if self.task.is_none() || self.stopping {
             return;
         }
@@ -630,9 +703,47 @@ impl App {
         EnableWindow(self.by_id[&STOP], 0);
         self.status("正在停止并关闭连接…", rgb(90, 99, 112));
     }
+    unsafe fn quit(&mut self) {
+        self.stop();
+        if let Some(tray) = &mut self.tray {
+            tray.remove();
+        }
+        DestroyWindow(self.hwnd);
+    }
+    unsafe fn hide_to_tray(&mut self) -> bool {
+        if self.tray.as_ref().is_some_and(|tray| tray.installed) {
+            ShowWindow(self.hwnd, SW_HIDE);
+            true
+        } else {
+            false
+        }
+    }
     unsafe fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
+                Event::Inventory(generation, result) if generation == self.inventory_generation => {
+                    self.inventory_task.take();
+                    match result {
+                        Ok(catalog) => {
+                            self.catalog = catalog;
+                            self.render_catalog();
+                            self.set(
+                                CATALOG_STATUS,
+                                &format!(
+                                    "{} 个模型 · {} 个账号池",
+                                    self.catalog.models.len(),
+                                    self.catalog.pools
+                                ),
+                            );
+                            self.append("已通过 TEE 验证并刷新模型、账号池及账号状态。");
+                        }
+                        Err(error) => {
+                            self.set(CATALOG_STATUS, "刷新失败 · 请查看运行记录");
+                            self.append(&error);
+                        }
+                    }
+                    self.busy(self.task.is_some());
+                }
                 Event::Started(generation, url)
                     if generation == self.generation && !self.stopping =>
                 {
@@ -640,6 +751,10 @@ impl App {
                     self.set(URL, &url);
                     self.status("运行中 · 每条上游连接独立验证", rgb(20, 117, 73));
                     self.append(&format!("网关已启动：{url}"));
+                    self.busy(true);
+                    if let Err(error) = self.refresh_catalog() {
+                        self.append(&error.to_string());
+                    }
                 }
                 Event::Verified(generation, ok, lines) if generation == self.generation => {
                     self.task.take();
@@ -697,6 +812,20 @@ impl App {
                 self.finished_observed = true;
             }
         }
+        if self
+            .inventory_task
+            .as_ref()
+            .is_some_and(|task| task.is_finished())
+        {
+            if self.inventory_finished_observed {
+                self.inventory_task.take();
+                self.set(CATALOG_STATUS, "刷新意外结束 · 可重新刷新");
+                self.append("列表刷新任务未返回完成状态。");
+                self.busy(self.task.is_some());
+            } else {
+                self.inventory_finished_observed = true;
+            }
+        }
     }
 }
 
@@ -718,13 +847,59 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
     if !pointer.is_null()
         && let Ok(mut app) = (&*pointer).try_borrow_mut()
     {
+        if app
+            .tray
+            .as_ref()
+            .is_some_and(|tray| tray.restart != 0 && message == tray.restart)
+        {
+            if let Some(tray) = &mut app.tray {
+                tray.recreate();
+            }
+            if !app.tray.as_ref().is_some_and(|tray| tray.installed) {
+                tray::unavailable(&mut app);
+            }
+            return 0;
+        }
         match message {
+            tray::MESSAGE => {
+                let notification = (lp as u32) & 0xffff;
+                let action = if matches!(
+                    notification,
+                    windows_sys::Win32::UI::Shell::NIN_SELECT | tray::KEY_SELECT | WM_LBUTTONDBLCLK
+                ) {
+                    tray::OPEN
+                } else if matches!(notification, WM_CONTEXTMENU | WM_RBUTTONUP) {
+                    app.tray.as_ref().map_or(0, |tray| {
+                        tray.menu(app.task.is_some() || app.inventory_task.is_some())
+                    })
+                } else {
+                    0
+                };
+                if let Err(error) = app.action(action) {
+                    app.append(&error.to_string());
+                    tray::restore(hwnd);
+                }
+                return 0;
+            }
+            WM_NOTIFY => {
+                let notification = &*(lp as *const NMHDR);
+                if notification.idFrom == TABS as usize && notification.code == TCN_SELCHANGE {
+                    let page = SendMessageW(app.by_id[&TABS], TCM_GETCURSEL, 0, 0).max(0) as usize;
+                    app.select_page(page);
+                }
+                return 0;
+            }
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
+                if id == SEARCH && notification == EN_CHANGE as u16 {
+                    app.render_catalog();
+                    return 0;
+                }
                 if FIELDS.contains(&id)
                     && notification == EN_CHANGE as u16
                     && app.task.is_none()
+                    && app.inventory_task.is_none()
                     && app.by_id.contains_key(&URL)
                 {
                     if id == PORT
@@ -732,9 +907,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                     {
                         app.set(URL, &format!("http://127.0.0.1:{port}/v1"));
                     }
+                    if matches!(id, ROUTER | ROUTER_KEY | TDX | SNP) {
+                        app.invalidate_catalog();
+                    }
                     app.status("配置已修改 · 请验证或启动", rgb(90, 99, 112));
                 } else if notification == BN_CLICKED as u16
-                    && app.by_id.contains_key(&id)
+                    && (app.by_id.contains_key(&id)
+                        || matches!(id, tray::OPEN | tray::TOGGLE | tray::EXIT))
                     && let Err(error) = app.action(id)
                 {
                     app.status("操作失败，请检查运行记录", rgb(170, 40, 40));
@@ -747,7 +926,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                 return 0;
             }
             WM_SIZE => {
-                app.layout();
+                if wp == SIZE_MINIMIZED as usize {
+                    app.hide_to_tray();
+                } else {
+                    app.layout();
+                }
                 return 0;
             }
             WM_DPICHANGED => {
@@ -768,8 +951,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             }
             WM_GETMINMAXINFO => {
                 let size = &mut *(lp as *mut MINMAXINFO);
-                size.ptMinTrackSize.x = app.scale(780);
-                size.ptMinTrackSize.y = app.scale(710);
+                size.ptMinTrackSize.x = app.scale(900);
+                size.ptMinTrackSize.y = app.scale(650);
                 return 0;
             }
             WM_CTLCOLORSTATIC => {
@@ -784,8 +967,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                 return GetSysColorBrush(COLOR_WINDOW) as isize;
             }
             WM_CLOSE => {
-                app.stop();
-                DestroyWindow(hwnd);
+                if !app.hide_to_tray() {
+                    app.quit();
+                }
+                return 0;
+            }
+            WM_QUERYENDSESSION => return 1,
+            WM_ENDSESSION if wp != 0 => {
+                app.quit();
                 return 0;
             }
             _ => {}
