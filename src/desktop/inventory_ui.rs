@@ -418,16 +418,13 @@ impl App {
         ensure!(
             self.inventory_task.is_none()
                 && !self.stopping
-                && (self.task.is_none()
-                    || (self.running
-                        && !self.routing_policy()?.automatic
-                        && self.text(POOL) == pool)),
-            "请先停止代理再切换账号池；当前代理仍使用原账号池"
+                && (self.task.is_none() || self.running),
+            "请等待当前操作完成后再切换账号池"
         );
         let (mut profile, secrets) = self.snapshot()?;
         profile.pool = pool.into();
         profile.routing.automatic = false;
-        settings::save(&self.path, &profile, &secrets)?;
+        self.save_profile(&profile, &secrets)?;
         self.set(POOL, pool);
         SendMessageW(self.by_id[&ROUTE_MODE], CB_SETCURSEL, 0, 0);
         self.refresh_route_pools();
@@ -488,7 +485,7 @@ impl App {
                     pool.name,
                     model,
                     if self.running {
-                        "。"
+                        "；新请求立即生效。"
                     } else {
                         "；启动代理后生效。"
                     }
@@ -514,17 +511,20 @@ impl App {
                 self.select_page(MODEL_PAGE);
             }
             USE_POOL => {
-                ensure!(
-                    self.task.is_none() && self.inventory_task.is_none(),
-                    "请先停止网关，再切换账号池"
-                );
                 let pool = self
                     .account_pool()
                     .context("请先选择一个账号池")?
                     .id
                     .clone();
                 self.select_inventory_pool(&pool)?;
-                self.append(&format!("已保存账号池 {pool}；下次启动生效。"));
+                self.append(&format!(
+                    "已保存账号池 {pool}；{}。",
+                    if self.running {
+                        "新请求立即生效"
+                    } else {
+                        "下次启动生效"
+                    }
+                ));
                 self.select_page(ROUTE_PAGE);
             }
             _ => {}
@@ -712,24 +712,78 @@ mod tests {
                 assert_ne!(IsWindowEnabled(state.by_id[&ROUTE_MAX]), 0);
                 assert_eq!(IsWindowEnabled(state.by_id[&ROUTE_PRIORITY]), 0);
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
+                let (profile, secrets) = state.snapshot().unwrap();
+                let proxy = Proxy::new(
+                    profile
+                        .config(&secrets, state.path.parent().unwrap())
+                        .unwrap(),
+                    client::Trust::default(),
+                    "test-key",
+                    None,
+                )
+                .unwrap();
                 state.task = Some(state.runtime.spawn(std::future::pending::<()>()));
                 state.running = true;
+                state.live_proxy = Some(proxy.clone());
+                state.busy(true);
+                assert_ne!(IsWindowEnabled(state.by_id[&ROUTE_MODE]), 0);
+                assert_ne!(IsWindowEnabled(state.by_id[&ROUTE_MAX]), 0);
+                assert_ne!(IsWindowEnabled(state.by_id[&ROUTE_SAVE]), 0);
+                assert_ne!(IsWindowEnabled(state.by_id[&USE_POOL]), 0);
+                assert_eq!(IsWindowEnabled(state.by_id[&ROUTER]), 0);
+                let original_rules = proxy.routing_rules();
+                let original_file = std::fs::read(&state.path).unwrap();
                 SendMessageW(state.by_id[&ROUTE_MODE], CB_SETCURSEL, 1, 0);
-                assert!(state.use_model(index).is_err());
-                SendMessageW(state.by_id[&ROUTE_MODE], CB_SETCURSEL, 0, 0);
+                state.routing_action(ROUTE_MODE).unwrap();
+                assert!(state.text(ROUTE_CURRENT).starts_with("未保存"));
+                assert_eq!(proxy.routing_rules(), original_rules);
+                state.set(ROUTE_MAX, "NaN");
+                assert!(state.action(ROUTE_SAVE).is_err());
+                assert_eq!(proxy.routing_rules(), original_rules);
+                assert_eq!(std::fs::read(&state.path).unwrap(), original_file);
+                state.set(ROUTE_MAX, "0.2");
+                let saved_path = state.path.clone();
+                state.path = saved_path.join("cannot-create-under-file.json");
+                assert!(state.action(ROUTE_SAVE).is_err());
+                assert_eq!(proxy.routing_rules(), original_rules);
+                state.path = saved_path;
+                assert_eq!(std::fs::read(&state.path).unwrap(), original_file);
+                state.action(ROUTE_SAVE).unwrap();
+                assert!(state.text(ROUTE_CURRENT).starts_with("已生效"));
+                assert!(proxy.routing_rules().policy.automatic);
+                assert_eq!(
+                    proxy.routing_rules().policy.max_multiplier_millionths,
+                    200000
+                );
+                assert_eq!(
+                    settings::load(&state.path).unwrap().0.routing,
+                    proxy.routing_rules().policy
+                );
                 SendMessageW(state.by_id[&MODEL_POOL], CB_SETCURSEL, 0, 0);
                 state.inventory_action(MODEL_POOL).unwrap();
                 assert_eq!(state.model_rows.len(), 2);
                 let index = state.model_rows[0];
-                assert!(state.use_model(index).is_err());
-                assert_eq!(state.text(POOL), "pool-b");
-                assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
+                state.use_model(index).unwrap();
+                assert_eq!(state.text(POOL), "pool-a");
+                assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
+                assert_eq!(proxy.routing_rules().pool.as_deref(), Some("pool-a"));
+                assert!(!proxy.routing_rules().policy.automatic);
+                assert_eq!(
+                    proxy.routing_rules().policy.max_multiplier_millionths,
+                    200000
+                );
                 SendMessageW(state.by_id[&MODEL_POOL], CB_SETCURSEL, 1, 0);
                 state.inventory_action(MODEL_POOL).unwrap();
                 let index = state.model_rows[0];
                 assert_eq!(state.use_model(index).unwrap(), "beta");
+                state.account_pool_id = Some("pool-a".into());
+                state.inventory_action(USE_POOL).unwrap();
+                assert_eq!(proxy.routing_rules().pool.as_deref(), Some("pool-a"));
+                assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
+                assert_eq!(state.use_model(index).unwrap(), "beta");
                 state.task.take().unwrap().abort();
                 state.running = false;
+                state.live_proxy = None;
                 let selection = LVITEMW {
                     state: LVIS_SELECTED,
                     stateMask: LVIS_SELECTED,

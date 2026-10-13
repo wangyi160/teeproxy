@@ -55,7 +55,7 @@ const FIELDS: [u16; 10] = [
 ];
 
 enum Event {
-    Started(u64, String),
+    Started(u64, String, std::sync::Arc<Proxy>),
     Verified(u64, bool, Vec<String>),
     Failed(u64, String),
     Stopped(u64),
@@ -86,6 +86,7 @@ struct App {
     finished_observed: bool,
     generation: u64,
     running: bool,
+    live_proxy: Option<std::sync::Arc<Proxy>>,
     status_color: u32,
     log: Vec<String>,
     building_page: Option<usize>,
@@ -123,6 +124,7 @@ impl App {
             finished_observed: false,
             generation: 0,
             running: false,
+            live_proxy: None,
             status_color: rgb(90, 99, 112),
             log: Vec::new(),
             building_page: None,
@@ -525,7 +527,12 @@ impl App {
                 && !self.stopping
                 && (self.task.is_none() || self.running)) as i32,
         );
-        EnableWindow(self.by_id[&USE_POOL], (!value) as i32);
+        EnableWindow(
+            self.by_id[&USE_POOL],
+            (self.inventory_task.is_none()
+                && !self.stopping
+                && (self.task.is_none() || self.running)) as i32,
+        );
         EnableWindow(
             self.by_id[&COPY_MODEL],
             (self.inventory_task.is_none()
@@ -561,7 +568,7 @@ impl App {
             OPEN_SETTINGS => self.select_page(SETTINGS_PAGE),
             SAVE => {
                 let (profile, secrets) = self.snapshot()?;
-                settings::save(&self.path, &profile, &secrets)?;
+                self.save_profile(&profile, &secrets)?;
                 self.append("配置已保存，密钥已使用当前 Windows 用户加密。");
                 self.update_route_summary();
             }
@@ -619,6 +626,7 @@ impl App {
                             let _ = sender.send(Event::Started(
                                 generation,
                                 format!("http://{}/v1", listener.local_addr()?),
+                                proxy.clone(),
                             ));
                             proxy.serve_until(listener, async { let _ = shutdown_rx.await; }).await?;
                             let _ = sender.send(Event::Stopped(generation));
@@ -730,14 +738,12 @@ impl App {
                     }
                     self.busy(self.task.is_some());
                 }
-                Event::Started(generation, url)
+                Event::Started(generation, url, proxy)
                     if generation == self.generation && !self.stopping =>
                 {
                     self.running = true;
-                    self.set(
-                        ROUTE_CURRENT,
-                        &format!("运行中：{}", self.text(ROUTE_OVERVIEW)),
-                    );
+                    self.live_proxy = Some(proxy);
+                    self.update_route_summary();
                     self.set(URL, &url);
                     self.status("运行中 · 每条上游连接独立验证", rgb(20, 117, 73));
                     self.append(&format!("网关已启动：{url}"));
@@ -772,6 +778,7 @@ impl App {
                     self.shutdown.take();
                     self.stopping = false;
                     self.running = false;
+                    self.live_proxy = None;
                     self.busy(false);
                     self.status("操作失败，请检查运行记录", rgb(170, 40, 40));
                     self.append(&message);
@@ -780,6 +787,7 @@ impl App {
                     self.task.take();
                     self.shutdown.take();
                     self.running = false;
+                    self.live_proxy = None;
                     self.stopping = false;
                     self.busy(false);
                     self.status("已停止", rgb(90, 99, 112));
@@ -789,7 +797,9 @@ impl App {
                 Event::Route(generation, message)
                     if generation == self.generation && self.running =>
                 {
-                    self.set(ROUTE_CURRENT, &message);
+                    if self.route_matches_active() {
+                        self.set(ROUTE_CURRENT, &format!("最近请求：{message}"));
+                    }
                     self.append(&message);
                 }
                 _ => {}
@@ -801,6 +811,7 @@ impl App {
                 self.task.take();
                 self.shutdown.take();
                 self.running = false;
+                self.live_proxy = None;
                 self.stopping = false;
                 self.busy(false);
                 self.status("后台任务意外结束，请重新启动", rgb(170, 40, 40));

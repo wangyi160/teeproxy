@@ -117,6 +117,7 @@ pub struct Proxy {
     router_auth: HeaderValue,
     client_key: Option<zeroize::Zeroizing<String>>,
     routing: Arc<crate::routing::State>,
+    rules: Mutex<crate::routing::Rules>,
 }
 
 impl Proxy {
@@ -156,6 +157,10 @@ impl Proxy {
             router_auth,
             client_key: client_key.map(|key| zeroize::Zeroizing::new(key.to_owned())),
             routing: Default::default(),
+            rules: Mutex::new(crate::routing::Rules::new(
+                config.routing.clone(),
+                config.pool.clone(),
+            )?),
             config,
         }))
     }
@@ -165,6 +170,16 @@ impl Proxy {
     }
     pub fn observe_routes(&self, observer: Arc<dyn Fn(String) + Send + Sync>) {
         self.routing.observe(observer);
+    }
+
+    pub(crate) fn routing_rules(&self) -> crate::routing::Rules {
+        self.rules.lock().unwrap().clone()
+    }
+
+    /// Prepared and persisted by the UI before replacing the active rules.
+    #[cfg(any(windows, test))]
+    pub(crate) fn replace_routing(&self, rules: crate::routing::Rules) {
+        *self.rules.lock().unwrap() = rules;
     }
 
     /// Stops accepting and closes all existing client streams before returning.
@@ -272,6 +287,9 @@ impl Proxy {
         let Ok(permit) = self.requests.clone().try_acquire_owned() else {
             return failure(503, "proxy_busy");
         };
+        // Snapshot before awaiting the body or TEE handshake. Live edits only
+        // affect later requests, never the validation of this one's response.
+        let rules = self.routing_rules();
         let (parts, body) = request.into_parts();
         let data = match timeout(
             Duration::from_secs(30),
@@ -294,7 +312,7 @@ impl Proxy {
             ) {
                 return failure(400, "routing_unsupported_protocol");
             }
-            match self.config.routing.header(self.config.pool.as_deref()) {
+            match rules.policy.header(rules.pool.as_deref()) {
                 Ok(rule) => Some(rule),
                 Err(_) => return failure(400, "routing_pool_required"),
             }
@@ -361,9 +379,8 @@ impl Proxy {
                         && pool
                             .bytes()
                             .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-                        && rate <= self.config.routing.max_multiplier_millionths
-                        && (self.config.routing.automatic
-                            || self.config.pool.as_deref() == Some(pool)) =>
+                        && rate <= rules.policy.max_multiplier_millionths
+                        && (rules.policy.automatic || rules.pool.as_deref() == Some(pool)) =>
                 {
                     self.routing.notify(format!(
                         "Router 已选择 {} · {}×",

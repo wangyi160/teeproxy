@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Priority {
     #[default]
@@ -11,7 +11,7 @@ pub enum Priority {
     Speed,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "PolicyInput")]
 pub struct Policy {
     pub automatic: bool,
@@ -67,6 +67,29 @@ impl Policy {
             "Invalid maximum multiplier"
         );
         Ok(())
+    }
+}
+
+/// One request owns one complete rule snapshot, including response validation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Rules {
+    pub policy: Policy,
+    pub pool: Option<String>,
+}
+impl Rules {
+    pub fn new(policy: Policy, pool: Option<String>) -> Result<Self> {
+        policy.validate()?;
+        if let Some(pool) = &pool {
+            ensure!(
+                !pool.is_empty()
+                    && pool.len() <= 128
+                    && pool
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c)),
+                "Invalid pool"
+            );
+        }
+        Ok(Self { policy, pool })
     }
 }
 pub fn parse_multiplier(text: &str) -> Result<u64> {

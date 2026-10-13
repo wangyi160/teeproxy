@@ -38,6 +38,8 @@ struct Upstream {
     running: Running,
     calls: Arc<Mutex<Vec<Captured>>>,
     attestations: Arc<AtomicUsize>,
+    release_headers: Arc<tokio::sync::Notify>,
+    generation_seen: Arc<tokio::sync::Notify>,
 }
 
 async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> Upstream {
@@ -62,6 +64,10 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
     let captured = calls.clone();
     let attestations = Arc::new(AtomicUsize::new(0));
     let attests = attestations.clone();
+    let release_headers = Arc::new(tokio::sync::Notify::new());
+    let gate = release_headers.clone();
+    let generation_seen = Arc::new(tokio::sync::Notify::new());
+    let seen = generation_seen.clone();
     let task = tokio::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         loop {
@@ -69,11 +75,11 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                 socket = listener.accept() => {
                     let (socket, _) = socket.unwrap();
                     let acceptor = acceptor.clone(); let certificate = certificate.clone();
-                    let captured = captured.clone(); let attests = attests.clone();
+                    let captured = captured.clone(); let attests = attests.clone(); let gate = gate.clone(); let seen = seen.clone();
                     tasks.spawn(async move {
                         let Ok(tls) = acceptor.accept(socket).await else { return; };
                         let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-                            let certificate = certificate.clone(); let captured = captured.clone(); let attests = attests.clone();
+                            let certificate = certificate.clone(); let captured = captured.clone(); let attests = attests.clone(); let gate = gate.clone(); let seen = seen.clone();
                             async move {
                                 let (parts, body) = request.into_parts();
                                 let bytes = to_bytes(Body::new(body), MAX_BODY + 1024).await.unwrap();
@@ -89,7 +95,10 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                     return Ok::<_, Infallible>(Response::new(Body::from(value.to_string())));
                                 }
                                 let rule = parts.headers.get("x-router-routing").map(|v|serde_json::from_slice::<serde_json::Value>(v.as_bytes()).unwrap());
+                                let hold = response_mode == "live-update" && serde_json::from_slice::<serde_json::Value>(&bytes).is_ok_and(|v|v["input"] == "hold");
                                 captured.lock().unwrap().push(Captured { path: parts.uri.to_string(), headers: parts.headers, body: bytes });
+                                if rule.is_some() { seen.notify_one(); }
+                                if hold { gate.notified().await; }
                                 if parts.uri.path() == "/health/live" {
                                     let health = if response_mode == "old-router" { json!({"status":"ok"}) } else { json!({"status":"ok","routing_protocol_versions":[1]}) };
                                     return Ok(Response::new(Body::from(health.to_string())));
@@ -112,7 +121,7 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                     };
                                     return Ok(Response::new(Body::from(body.to_string())));
                                 }
-                                let body = if response_mode == "stream" || response_mode == "stall" {
+                                let body = if matches!(response_mode, "stream" | "stall" | "live-update") {
                                     Body::from_stream(futures_util::stream::unfold(0, move |state| async move {
                                         match state {
                                             0 => Some((Ok::<_, std::io::Error>(Bytes::from_static(b"data: first\n\n")), 1)),
@@ -129,7 +138,8 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                 if let Some(rule) = rule {
                                     let pool = if rule["mode"] == "auto" { "m_router.selected" } else { rule["pool"].as_str().unwrap() };
                                     response.headers_mut().insert("x-router-pool",pool.parse().unwrap());
-                                    response.headers_mut().insert("x-router-multiplier-millionths", "200000".parse().unwrap());
+                                    let rate = if response_mode == "live-update" { rule["max_multiplier_millionths"].as_u64().unwrap().min(200000) } else { 200000 };
+                                    response.headers_mut().insert("x-router-multiplier-millionths", rate.into());
                                     response.headers_mut().insert("x-router-price-version", "9".parse().unwrap());
                                     if response_mode != "unconfirmed-rule" { response.headers_mut().insert("x-router-routing-version", "1".parse().unwrap()); }
                                 }
@@ -151,6 +161,8 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
         running: Running { url, task },
         calls,
         attestations,
+        release_headers,
+        generation_seen,
     }
 }
 
@@ -186,6 +198,106 @@ fn agent() -> reqwest::Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[tokio::test]
+async fn live_rules_apply_to_new_requests_without_changing_pending_or_streaming_requests() {
+    use crate::routing::{Policy, Priority, Rules};
+    let upstream = upstream("teeproxy-unit-test", "live-update").await;
+    let mut config = config(&upstream);
+    config.max_in_flight = 3;
+    let gateway = Proxy::new(
+        config,
+        Trust {
+            allow_test_evidence: true,
+            ..Trust::default()
+        },
+        "key",
+        None,
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+    let server = gateway.clone();
+    let _running = Running {
+        url: url.clone(),
+        task: tokio::spawn(async move {
+            server.serve(listener).await.unwrap();
+        }),
+    };
+    let client = agent();
+    let pending = client
+        .post(&url)
+        .json(&json!({"model":"same-model","input":"hold"}))
+        .send();
+    let pending = tokio::spawn(pending);
+    timeout(Duration::from_secs(3), upstream.generation_seen.notified())
+        .await
+        .unwrap();
+    // The old request has reached the router but has no response headers yet.
+    gateway.replace_routing(
+        Rules::new(
+            Policy {
+                max_multiplier_millionths: 100000,
+                ..Policy::default()
+            },
+            Some("m_new.pool".into()),
+        )
+        .unwrap(),
+    );
+    let mut streaming = client
+        .post(&url)
+        .json(&json!({"model":"same-model"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(streaming.status(), 201);
+    assert_eq!(streaming.headers()["x-teeproxy-pool"], "m_new.pool");
+    assert_eq!(streaming.chunk().await.unwrap().unwrap(), "data: first\n\n");
+    // Another save while this response streams must not close either connection.
+    gateway.replace_routing(
+        Rules::new(
+            Policy {
+                automatic: true,
+                max_multiplier_millionths: 50000,
+                priority: Priority::Speed,
+            },
+            None,
+        )
+        .unwrap(),
+    );
+    upstream.release_headers.notify_one();
+    let old = pending.await.unwrap().unwrap();
+    assert_eq!(old.status(), 201);
+    assert_eq!(old.headers()["x-teeproxy-pool"], "m_a.pool");
+    assert_eq!(old.headers()["x-teeproxy-multiplier"], "0.2");
+    assert!(old.text().await.unwrap().contains("[DONE]"));
+    assert!(streaming.text().await.unwrap().contains("[DONE]"));
+    let newest = client
+        .post(&url)
+        .json(&json!({"model":"same-model"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(newest.status(), 201);
+    assert_eq!(newest.headers()["x-teeproxy-pool"], "m_router.selected");
+    assert_eq!(newest.headers()["x-teeproxy-multiplier"], "0.05");
+    assert!(newest.text().await.unwrap().contains("[DONE]"));
+    let calls = upstream.calls.lock().unwrap();
+    let rules: Vec<serde_json::Value> = calls
+        .iter()
+        .filter(|c| c.path == "/v1/responses")
+        .map(|c| serde_json::from_slice(c.headers["x-router-routing"].as_bytes()).unwrap())
+        .collect();
+    assert_eq!(rules.len(), 3);
+    assert_eq!(rules[0]["pool"], "m_a.pool");
+    assert_eq!(rules[0]["max_multiplier_millionths"], 1000000);
+    assert_eq!(rules[1]["pool"], "m_new.pool");
+    assert_eq!(rules[1]["max_multiplier_millionths"], 100000);
+    assert_eq!(rules[2]["mode"], "auto");
+    assert_eq!(rules[2]["priority"], "speed");
+    assert_eq!(rules[2]["max_multiplier_millionths"], 50000);
+    assert!(rules[2].get("pool").is_none());
 }
 
 #[tokio::test]

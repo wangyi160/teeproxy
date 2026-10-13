@@ -86,7 +86,7 @@ impl App {
             2,
         )?;
         self.label(
-            "Router 超限拒绝调用上游；保存后下次启动生效。",
+            "保存后新请求立即生效；正在进行的请求继续使用原规则。",
             [268, 478, -316, 24],
             2,
         )?;
@@ -117,6 +117,7 @@ impl App {
         Ok(policy)
     }
     pub(super) unsafe fn update_route_controls(&self, busy: bool) {
+        let busy = self.stopping || (busy && !self.running);
         let automatic = SendMessageW(self.by_id[&ROUTE_MODE], CB_GETCURSEL, 0, 0) == 1;
         EnableWindow(self.by_id[&ROUTE_PRIORITY], (!busy && automatic) as i32);
         EnableWindow(self.by_id[&ROUTE_MODE], (!busy) as i32);
@@ -174,20 +175,89 @@ impl App {
                 self.text(ROUTE_MAX)
             )
         };
-        self.set(ROUTE_OVERVIEW, &summary);
-        if !self.running {
+        if let Some(proxy) = &self.live_proxy {
+            let active = proxy.routing_rules();
+            let active_summary = format!(
+                "{} · ≤ {}×",
+                if active.policy.automatic {
+                    format!(
+                        "自动匹配 · {}",
+                        if active.policy.priority == Priority::Speed {
+                            "速率优先（实测）"
+                        } else {
+                            "费率优先"
+                        }
+                    )
+                } else {
+                    let id = active.pool.as_deref().unwrap_or("尚未选择");
+                    format!(
+                        "指定账号池 · {}",
+                        self.catalog
+                            .pools
+                            .iter()
+                            .find(|p| p.id == id)
+                            .map(|p| p.label.as_str())
+                            .unwrap_or(id)
+                    )
+                },
+                crate::routing::format_multiplier(active.policy.max_multiplier_millionths)
+            );
+            self.set(ROUTE_OVERVIEW, &active_summary);
+            self.set(
+                ROUTE_CURRENT,
+                &if self.route_matches_active() {
+                    format!("已生效：{active_summary}")
+                } else {
+                    format!("未保存：{summary}")
+                },
+            );
+        } else {
+            self.set(ROUTE_OVERVIEW, &summary);
             self.set(ROUTE_CURRENT, &format!("下次启动：{summary}"));
-        } else if !automatic {
-            self.set(ROUTE_CURRENT, &format!("运行中：{summary}"));
         }
+    }
+    pub(super) unsafe fn route_matches_active(&self) -> bool {
+        self.live_proxy.as_ref().is_some_and(|proxy| {
+            let active = proxy.routing_rules();
+            self.routing_policy()
+                .is_ok_and(|draft| draft == active.policy)
+                && (active.policy.automatic
+                    || self.text(POOL).trim() == active.pool.as_deref().unwrap_or(""))
+        })
+    }
+    pub(super) unsafe fn save_profile(
+        &mut self,
+        profile: &Profile,
+        secrets: &Secrets,
+    ) -> Result<()> {
+        ensure!(
+            !self.stopping && (self.task.is_none() || self.running),
+            "请等待当前操作完成"
+        );
+        let config = profile.config(secrets, self.path.parent().unwrap())?;
+        let rules = crate::routing::Rules::new(config.routing, config.pool)?;
+        if self.running {
+            ensure!(self.live_proxy.is_some(), "代理尚未就绪");
+            ensure!(
+                rules.policy.automatic || rules.pool.is_some(),
+                "请选择账号池"
+            );
+        }
+        // Persist first: invalid input or a failed disk write never changes live rules.
+        settings::save(&self.path, profile, secrets)?;
+        if let Some(proxy) = &self.live_proxy {
+            proxy.replace_routing(rules);
+            self.append("路由规则已生效：新请求使用新规则，正在进行的请求继续使用原规则。");
+        }
+        Ok(())
     }
     pub(super) unsafe fn routing_action(&mut self, id: u16) -> Result<()> {
         match id {
             ROUTE_SAVE => self.action(SAVE)?,
             ROUTE_MODE | ROUTE_POOL | ROUTE_PRIORITY => {
                 ensure!(
-                    self.task.is_none() && self.inventory_task.is_none(),
-                    "请先停止代理再修改路由"
+                    !self.stopping && (self.task.is_none() || self.running),
+                    "请等待当前操作完成"
                 );
                 if id == ROUTE_POOL {
                     let index = SendMessageW(self.by_id[&ROUTE_POOL], CB_GETCURSEL, 0, 0);

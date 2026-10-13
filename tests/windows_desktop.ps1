@@ -123,6 +123,17 @@ try {
     Click-Control 203
     Wait-Until { (Read-Control 110).Contains("http://127.0.0.1:$testPort/v1") }
     if ([TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,101))) { throw 'Upstream editable while running' }
+    Select-Page 5
+    foreach ($id in @(601,605,607)) {
+        if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,$id))) { throw "Routing control $id disabled while running" }
+    }
+    Set-Control 605 '0.5'
+    if (-not (Read-Control 609).StartsWith((-join [char[]]@(0x672a,0x4fdd,0x5b58)))) { throw 'Unsaved rule was not identified' }
+    Click-Control 607
+    Wait-Until { (Read-Control 609).StartsWith((-join [char[]]@(0x5df2,0x751f,0x6548))) }
+    $liveSaved = [IO.File]::ReadAllText($settingsFile) | ConvertFrom-Json
+    if ($liveSaved.profile.routing.max_multiplier_millionths -ne 500000) { throw 'Live rule not saved' }
+    if (-not (Read-Control 109).StartsWith((-join [char[]]@(0x8fd0,0x884c,0x4e2d)))) { throw 'Saving routing stopped the proxy' }
     # Exercise the actual notification-area callback, minimize, and close behavior.
     [void][TeeproxyUi]::Send($script:window,0x8011,[IntPtr]::Zero,[IntPtr]0x0400)
     Wait-Until { [TeeproxyUi]::IsWindowVisible($script:window) }
@@ -154,5 +165,5 @@ try {
     Close-TestWindow
     $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$testPort)
     $portProbe.Start(); $portProbe.Stop()
-    'Native desktop smoke passed: sidebar pages, save/reopen, masked key, inventory/verification failure, tray restore/minimize/close, background API, stop/exit listener cleanup'
+    'Native desktop smoke passed: sidebar pages, save/reopen, live routing edits, masked key, inventory/verification failure, tray restore/minimize/close, background API, stop/exit listener cleanup'
 } finally { Close-TestWindow }

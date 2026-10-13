@@ -49,7 +49,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        self.routing.validate()?;
+        crate::routing::Rules::new(self.routing.clone(), self.pool.clone())?;
         ensure!(
             self.listen.ip().is_loopback(),
             "The proxy must listen on a loopback IP"
@@ -75,16 +75,6 @@ impl Config {
             !self.router_key_env.is_empty(),
             "router_key_env is required"
         );
-        if let Some(pool) = &self.pool {
-            ensure!(
-                !pool.is_empty()
-                    && pool.len() <= 128
-                    && pool
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c)),
-                "Invalid pool"
-            );
-        }
         Ok(())
     }
 
