@@ -11,12 +11,17 @@ pub(super) const CATALOG_STATUS: u16 = 308;
 pub(super) const MODEL_POOL: u16 = 309;
 pub(super) const POOL_DETAILS: u16 = 310;
 pub(super) const VIEW_POOL_MODELS: u16 = 311;
+pub(super) const POOLS: u16 = 312;
+pub(super) const POOLS_EMPTY: u16 = 313;
+pub(super) const ACCOUNTS_TITLE: u16 = 314;
+pub(super) const POOLS_TITLE: u16 = 315;
 
 impl App {
     pub(super) unsafe fn scale_inventory_columns(&self) {
         for (id, widths) in [
             (MODELS, &[330, 148, 244][..]),
-            (ACCOUNTS, &[108, 112, 112, 145, 96, 82, 94, 66][..]),
+            (POOLS, &[144, 120, 104, 84, 152, 124][..]),
+            (ACCOUNTS, &[268, 160, 96, 112, 88][..]),
         ] {
             if let Some(hwnd) = self.by_id.get(&id) {
                 for (column, width) in widths.iter().enumerate() {
@@ -77,25 +82,66 @@ impl App {
         self.building_page = Some(ACCOUNT_PAGE);
         self.button(USE_POOL, "使用所选账号池", [244, 130, 168, 36], 0)?;
         self.button(VIEW_POOL_MODELS, "查看池内模型", [428, 130, 156, 36], 0)?;
+        self.add(
+            POOLS_TITLE,
+            w!("STATIC"),
+            "账号池",
+            SS_LEFT,
+            [260, 200, -312, 24],
+            2,
+        )?;
+        self.table(
+            POOLS,
+            &[
+                ("账号池", 144),
+                ("商户", 120),
+                ("价格倍率", 104),
+                ("账号数量", 84),
+                ("供应商", 152),
+                ("状态", 124),
+            ],
+        )?;
+        self.add(
+            ACCOUNTS_TITLE,
+            w!("STATIC"),
+            "账号列表 · 请先选择账号池",
+            SS_LEFT,
+            [260, 426, -312, 24],
+            2,
+        )?;
         self.table(
             ACCOUNTS,
             &[
-                ("账号池", 108),
-                ("价格倍率", 112),
-                ("商户", 112),
-                ("账号", 145),
-                ("供应商", 96),
-                ("状态", 82),
-                ("模型目录", 94),
-                ("模型数", 66),
+                ("账号", 268),
+                ("供应商", 160),
+                ("状态", 96),
+                ("模型目录", 112),
+                ("模型数", 88),
             ],
         )?;
         let empty = self.add(
+            POOLS_EMPTY,
+            w!("STATIC"),
+            "尚未加载账号池\r\n\r\n请完成连接设置，然后点击刷新列表。",
+            windows_sys::Win32::System::SystemServices::SS_CENTER,
+            [284, 280, -360, 80],
+            0,
+        )?;
+        SetWindowPos(
+            empty,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        let empty = self.add(
             ACCOUNTS_EMPTY,
             w!("STATIC"),
-            "尚未加载账号池\r\n\r\n验证连接后，可查看上游账号及可用状态。",
+            "请选择上方的账号池\r\n\r\n此处只显示所选池中的账号。",
             windows_sys::Win32::System::SystemServices::SS_CENTER,
-            [284, 332, -360, 100],
+            [284, 518, -360, 80],
             0,
         )?;
         SetWindowPos(
@@ -116,10 +162,10 @@ impl App {
             WC_LISTVIEWW,
             "",
             WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-            if id == MODELS {
-                [260, 280, -312, -380]
-            } else {
-                [260, 198, -312, -300]
+            match id {
+                MODELS => [260, 280, -312, -380],
+                POOLS => [260, 234, -312, 152],
+                _ => [260, 460, -312, -560],
             },
             0,
         )?;
@@ -155,6 +201,10 @@ impl App {
             .flatten()
     }
     pub(super) unsafe fn replace_catalog(&mut self, catalog: catalog::Catalog) {
+        let account_preferred = self.account_pool_id.clone().or_else(|| {
+            let id = self.text(POOL);
+            (!id.is_empty()).then_some(id)
+        });
         let preferred = self.model_pool().map(|p| p.id.clone()).or_else(|| {
             let id = self.text(POOL);
             (!id.is_empty()).then_some(id)
@@ -182,19 +232,81 @@ impl App {
                 .or_else(|| (!self.catalog.pools.is_empty()).then_some(0))
         };
         SendMessageW(selector, CB_SETCURSEL, index.unwrap_or(usize::MAX), 0);
-        self.render_accounts();
+        self.render_pools(account_preferred.as_deref());
         self.render_catalog();
+    }
+    pub(super) fn account_pool(&self) -> Option<&catalog::Pool> {
+        self.catalog
+            .pools
+            .iter()
+            .find(|p| Some(&p.id) == self.account_pool_id.as_ref())
+    }
+    unsafe fn render_pools(&mut self, preferred: Option<&str>) {
+        let rows = self
+            .catalog
+            .pools
+            .iter()
+            .map(|p| {
+                vec![
+                    p.name.clone(),
+                    p.merchant.clone(),
+                    p.multiplier.clone(),
+                    p.account_count.to_string(),
+                    p.provider.clone(),
+                    p.state.clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        fill(self.by_id[&POOLS], &rows);
+        let index = if let Some(id) = preferred {
+            self.catalog.pools.iter().position(|p| p.id == id)
+        } else {
+            (!self.catalog.pools.is_empty()).then_some(0)
+        };
+        self.account_pool_id = index.map(|i| self.catalog.pools[i].id.clone());
+        if let Some(index) = index {
+            let selection = LVITEMW {
+                state: LVIS_SELECTED | LVIS_FOCUSED,
+                stateMask: LVIS_SELECTED | LVIS_FOCUSED,
+                ..mem::zeroed()
+            };
+            SendMessageW(
+                self.by_id[&POOLS],
+                LVM_SETITEMSTATE,
+                index,
+                (&selection as *const LVITEMW) as isize,
+            );
+            SendMessageW(self.by_id[&POOLS], LVM_ENSUREVISIBLE, index, 0);
+        }
+        self.set(
+            POOLS_TITLE,
+            &format!("账号池 · {} 个", self.catalog.pools.len()),
+        );
+        self.set(
+            POOLS_EMPTY,
+            if self.catalog_loaded {
+                "没有可见的账号池\r\n\r\n当前业务密钥没有可显示的账号池。"
+            } else {
+                "尚未加载账号池\r\n\r\n请完成连接设置，然后点击刷新列表。"
+            },
+        );
+        self.render_accounts();
+    }
+    pub(super) unsafe fn pool_selection_changed(&mut self) {
+        self.account_pool_id = selected(self.by_id[&POOLS])
+            .and_then(|i| self.catalog.pools.get(i))
+            .map(|p| p.id.clone());
+        self.render_accounts();
+        self.update_visibility();
     }
     unsafe fn render_accounts(&self) {
         let accounts = self
             .catalog
             .accounts
             .iter()
+            .filter(|a| Some(&a.pool) == self.account_pool_id.as_ref())
             .map(|a| {
                 vec![
-                    a.pool_name.as_str(),
-                    a.multiplier.as_str(),
-                    a.merchant.as_str(),
                     a.id.as_str(),
                     a.provider.as_str(),
                     a.state.as_str(),
@@ -204,6 +316,25 @@ impl App {
             })
             .collect::<Vec<_>>();
         fill(self.by_id[&ACCOUNTS], &accounts);
+        self.set(
+            ACCOUNTS_TITLE,
+            &if let Some(pool) = self.account_pool() {
+                format!(
+                    "账号列表 · {} · {} · {} 个账号",
+                    pool.name, pool.merchant, pool.account_count
+                )
+            } else {
+                "账号列表 · 请先选择账号池".into()
+            },
+        );
+        self.set(
+            ACCOUNTS_EMPTY,
+            if self.account_pool().is_some() {
+                "此账号池暂无账号"
+            } else {
+                "请选择上方的账号池\r\n\r\n此处只显示所选池中的账号。"
+            },
+        );
     }
     pub(super) unsafe fn render_catalog(&mut self) {
         let filter = self.text(SEARCH).to_lowercase();
@@ -270,14 +401,6 @@ impl App {
                 "请选择账号池".into()
             },
         );
-        self.set(
-            ACCOUNTS_EMPTY,
-            if self.catalog_loaded {
-                "没有可见的账号池\r\n\r\n当前业务密钥没有可显示的上游账号。"
-            } else {
-                "尚未加载账号池\r\n\r\n验证连接后，可查看上游账号及可用状态。"
-            },
-        );
         self.update_summary();
         self.update_visibility();
     }
@@ -285,7 +408,7 @@ impl App {
         self.catalog = Default::default();
         self.catalog_loaded = false;
         SendMessageW(self.by_id[&MODEL_POOL], CB_RESETCONTENT, 0, 0);
-        self.render_accounts();
+        self.render_pools(None);
         self.render_catalog();
         self.set(CATALOG_STATUS, "配置已修改 · 请刷新列表");
     }
@@ -370,14 +493,12 @@ impl App {
                 self.render_catalog();
             }
             VIEW_POOL_MODELS => {
-                let row = selected(self.by_id[&ACCOUNTS])
-                    .and_then(|i| self.catalog.accounts.get(i))
-                    .context("请先选择一个账号池")?;
+                let pool = self.account_pool().context("请先选择一个账号池")?;
                 let index = self
                     .catalog
                     .pools
                     .iter()
-                    .position(|p| p.id == row.pool)
+                    .position(|p| p.id == pool.id)
                     .context("请刷新账号池")?;
                 SendMessageW(self.by_id[&MODEL_POOL], CB_SETCURSEL, index, 0);
                 self.set(SEARCH, "");
@@ -389,10 +510,11 @@ impl App {
                     self.task.is_none() && self.inventory_task.is_none(),
                     "请先停止网关，再切换账号池"
                 );
-                let row = selected(self.by_id[&ACCOUNTS])
-                    .and_then(|i| self.catalog.accounts.get(i))
-                    .context("请先选择一个账号")?;
-                let pool = row.pool.clone();
+                let pool = self
+                    .account_pool()
+                    .context("请先选择一个账号池")?
+                    .id
+                    .clone();
                 self.select_inventory_pool(&pool)?;
                 self.append(&format!("已保存账号池 {pool}；下次启动生效。"));
                 self.select_page(SETTINGS_PAGE);
@@ -406,7 +528,7 @@ unsafe fn selected(hwnd: HWND) -> Option<usize> {
     let index = SendMessageW(hwnd, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
     (index >= 0).then_some(index as usize)
 }
-unsafe fn fill(hwnd: HWND, rows: &[Vec<&str>]) {
+unsafe fn fill<T: AsRef<str>>(hwnd: HWND, rows: &[Vec<T>]) {
     // WM_SETREDRAW(TRUE) sets WS_VISIBLE, so never use it on a hidden page.
     let shown = GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE as isize != 0;
     if shown {
@@ -415,7 +537,7 @@ unsafe fn fill(hwnd: HWND, rows: &[Vec<&str>]) {
     SendMessageW(hwnd, LVM_DELETEALLITEMS, 0, 0);
     for (index, row) in rows.iter().enumerate() {
         for (column, text) in row.iter().enumerate() {
-            let mut text = wide(text);
+            let mut text = wide(text.as_ref());
             let item = LVITEMW {
                 mask: LVIF_TEXT,
                 iItem: index as i32,
@@ -444,6 +566,23 @@ unsafe fn fill(hwnd: HWND, rows: &[Vec<&str>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe fn cell_text(hwnd: HWND, row: usize, column: i32) -> String {
+        let mut buffer = [0u16; 256];
+        let mut item = LVITEMW {
+            iSubItem: column,
+            pszText: buffer.as_mut_ptr(),
+            cchTextMax: buffer.len() as i32,
+            ..mem::zeroed()
+        };
+        let length = SendMessageW(
+            hwnd,
+            LVM_GETITEMTEXTW,
+            row,
+            (&mut item as *mut LVITEMW) as isize,
+        );
+        String::from_utf16_lossy(&buffer[..length as usize])
+    }
 
     #[test]
     fn native_inventory_renders_filters_and_selects_the_pool() {
@@ -497,12 +636,20 @@ mod tests {
                         Secrets::default(),
                     )))
                     .unwrap();
-                let catalog = catalog::parse(
-                    &serde_json::json!({"data":[{"id":"alpha","router_pools":["pool-a"]},{"id":"beta","router_pools":["pool-a","pool-b"]}]}),
-                    &serde_json::json!({"data":[{"id":"pool-a","accounts":[{"id":"account-a","enabled":true,"available":true}]},{"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":false}]}]})
-                ).unwrap();
+                let models = serde_json::json!({"data":[{"id":"alpha","router_pools":["pool-a"]},{"id":"beta","router_pools":["pool-a","pool-b"]}]});
+                let mut pools = serde_json::json!({"data":[
+                    {"id":"pool-a","accounts":[{"id":"account-a","enabled":true,"available":true},{"id":"account-b","enabled":false,"available":false}]},
+                    {"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":false}]},
+                    {"id":"pool-empty","accounts":[]}
+                ]});
+                let catalog = catalog::parse(&models, &pools).unwrap();
                 state.replace_catalog(catalog);
                 assert_eq!(state.model_pool().unwrap().id, "pool-b");
+                assert_eq!(state.account_pool().unwrap().id, "pool-b");
+                assert_eq!(SendMessageW(state.by_id[&POOLS], LVM_GETITEMCOUNT, 0, 0), 3);
+                assert_eq!(cell_text(state.by_id[&POOLS], 0, 3), "2");
+                assert_eq!(cell_text(state.by_id[&POOLS], 1, 3), "1");
+                assert_eq!(cell_text(state.by_id[&POOLS], 2, 3), "0");
                 state.dpi = 144;
                 state.refresh_fonts();
                 assert_eq!(
@@ -525,8 +672,10 @@ mod tests {
                 );
                 assert_eq!(
                     SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
-                    2
+                    1
                 );
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 0), "account-b");
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 2), "暂不可用");
                 state.set(SEARCH, "BETA");
                 state.render_catalog();
                 assert_eq!(
@@ -557,11 +706,33 @@ mod tests {
                     stateMask: LVIS_SELECTED,
                     ..mem::zeroed()
                 };
+                // Deliver real list-view notifications without holding the UI borrow.
+                let pool_list = state.by_id[&POOLS];
+                drop(state);
                 SendMessageW(
-                    state.by_id[&ACCOUNTS],
+                    pool_list,
                     LVM_SETITEMSTATE,
                     0,
                     (&selection as *const LVITEMW) as isize,
+                );
+                let mut state = app.borrow_mut();
+                assert_eq!(state.account_pool().unwrap().id, "pool-a");
+                assert_eq!(
+                    SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
+                    2
+                );
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 0), "account-a");
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 1, 2), "已停用");
+                assert_eq!(state.text(POOL), "pool-b");
+                // Refresh may reorder rows; preserve the selected pool by full ID.
+                pools["data"][0]["pool_name"] = serde_json::json!("second");
+                pools["data"][1]["pool_name"] = serde_json::json!("first");
+                state.replace_catalog(catalog::parse(&models, &pools).unwrap());
+                assert_eq!(state.account_pool().unwrap().id, "pool-a");
+                assert_eq!(selected(state.by_id[&POOLS]), Some(2));
+                assert_eq!(
+                    SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
+                    2
                 );
                 state.inventory_action(VIEW_POOL_MODELS).unwrap();
                 assert_eq!(state.page, MODEL_PAGE);
@@ -579,6 +750,26 @@ mod tests {
                 );
                 assert!(state.model_pool().is_none());
                 assert!(state.model_rows.is_empty());
+                assert!(state.account_pool().is_none());
+                assert_eq!(
+                    SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
+                    0
+                );
+                drop(state);
+                SendMessageW(
+                    pool_list,
+                    LVM_SETITEMSTATE,
+                    0,
+                    (&selection as *const LVITEMW) as isize,
+                );
+                let mut state = app.borrow_mut();
+                assert_eq!(state.account_pool().unwrap().id, "pool-b");
+                assert_eq!(state.account_pool().unwrap().account_count, 0);
+                assert_eq!(
+                    SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
+                    0
+                );
+                assert_eq!(state.text(ACCOUNTS_EMPTY), "此账号池暂无账号");
                 let stale_catalog = mem::take(&mut state.catalog);
                 state.invalidate_catalog();
                 state.inventory_generation = 10;
@@ -600,6 +791,7 @@ mod tests {
                     SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
                     0
                 );
+                assert_eq!(SendMessageW(state.by_id[&POOLS], LVM_GETITEMCOUNT, 0, 0), 0);
                 state.tray.take();
                 DestroyWindow(hwnd);
                 for font in state.fonts {

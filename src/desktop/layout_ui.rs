@@ -24,7 +24,7 @@ const PAGES: [(&str, &str); 5] = [
         "模型列表",
         "先选择账号池，再使用该池的模型；切换运行中的池需先停止代理。",
     ),
-    ("账号池", "查看上游账号及可用状态，选择代理使用的账号池。"),
+    ("账号池", "在上方选择账号池，下方查看该池的账号及状态。"),
     ("连接设置", "配置上游 Router 与本地代理服务。"),
     ("运行记录", "查看连接验证、列表刷新和代理运行的详细记录。"),
 ];
@@ -271,7 +271,11 @@ impl App {
             let visible = match control.id {
                 REFRESH | CATALOG_STATUS => matches!(self.page, MODEL_PAGE | ACCOUNT_PAGE),
                 MODELS_EMPTY => self.page == MODEL_PAGE && self.model_rows.is_empty(),
-                ACCOUNTS_EMPTY => self.page == ACCOUNT_PAGE && self.catalog.accounts.is_empty(),
+                POOLS_EMPTY => self.page == ACCOUNT_PAGE && self.catalog.pools.is_empty(),
+                ACCOUNTS_EMPTY => {
+                    self.page == ACCOUNT_PAGE
+                        && self.account_pool().is_none_or(|p| p.account_count == 0)
+                }
                 _ => control.page.is_none_or(|page| page == self.page),
             };
             ShowWindow(control.hwnd, if visible { SW_SHOW } else { SW_HIDE });
@@ -340,7 +344,7 @@ impl App {
             ],
             SETTINGS_PAGE => vec![[244, 120, -280, 316], [244, 448, -280, 204]],
             MODEL_PAGE => vec![[244, 230, -280, -318]],
-            ACCOUNT_PAGE => vec![[244, 186, -280, -274]],
+            ACCOUNT_PAGE => vec![[244, 186, -280, 210], [244, 412, -280, -500]],
             LOG_PAGE => vec![[244, 128, -280, -184]],
             _ => Vec::new(),
         };

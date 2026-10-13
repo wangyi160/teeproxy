@@ -20,6 +20,7 @@ pub(crate) struct Pool {
     pub multiplier: String,
     pub state: String,
     pub label: String,
+    pub account_count: usize,
 }
 pub(crate) struct Model {
     pub id: String,
@@ -29,9 +30,6 @@ pub(crate) struct Model {
 }
 pub(crate) struct Account {
     pub pool: String,
-    pub pool_name: String,
-    pub merchant: String,
-    pub multiplier: String,
     pub id: String,
     pub provider: String,
     pub state: String,
@@ -139,7 +137,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             .as_array()
             .context("账号池缺少 accounts 列表")?;
         ensure!(
-            result.accounts.len() + accounts.len().max(1) <= 10000,
+            result.accounts.len() + accounts.len() <= 10000,
             "账号记录过多"
         );
         ensure!(!result.pools.iter().any(|p| p.id == name), "账号池 ID 重复");
@@ -176,20 +174,8 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             multiplier: rate.clone(),
             state: state.into(),
             label,
+            account_count: accounts.len(),
         });
-        if accounts.is_empty() {
-            result.accounts.push(Account {
-                pool: name.clone(),
-                pool_name: pool_name.clone(),
-                merchant: merchant.clone(),
-                multiplier: rate.clone(),
-                id: "（空池）".into(),
-                provider: provider(&pool["provider"]),
-                state: "无账号".into(),
-                catalog: "—".into(),
-                models: "0".into(),
-            });
-        }
         for account in accounts {
             ensure!(result.accounts.len() < 10000, "账号记录过多");
             let id = text(&account["id"]);
@@ -213,9 +199,6 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             };
             result.accounts.push(Account {
                 pool: name.clone(),
-                pool_name: pool_name.clone(),
-                merchant: merchant.clone(),
-                multiplier: rate.clone(),
                 id,
                 provider: provider(&account["provider"]),
                 state: state.into(),
@@ -361,11 +344,13 @@ mod tests {
             assert_eq!(multiplier(&value), expected);
         }
         let catalog = parse(&json!({"data":[]}), &json!({"data":[{"id":"m_id.pool","pool_name":"pool","merchant_name":"Shop","multiplier_millionths":200000,"accounts":[]}]})).unwrap();
-        let row = &catalog.accounts[0];
-        assert_eq!(row.pool, "m_id.pool");
-        assert_eq!(row.pool_name, "pool");
+        let row = &catalog.pools[0];
+        assert_eq!(row.id, "m_id.pool");
+        assert_eq!(row.name, "pool");
         assert_eq!(row.merchant, "Shop");
         assert_eq!(row.multiplier, "0.2×");
+        assert_eq!(row.account_count, 0);
+        assert!(catalog.accounts.is_empty());
     }
     #[test]
     fn inventory_uses_public_fields_and_preserves_unavailable_accounts_and_empty_pools() {
@@ -373,9 +358,12 @@ mod tests {
             &json!({"data":[{"id":"p","accounts":[{"id":"account-a","provider":"openai","enabled":true,"available":false,"catalog":{"state":"error","visible_models":0},"credential":"NEVER_DISPLAY"}]},{"id":"empty","accounts":[]}]})).unwrap();
         assert_eq!(catalog.models[0].id, "model-a");
         assert_eq!(catalog.models[0].protocols, "responses");
-        assert_eq!(catalog.accounts[1].state, "暂不可用");
-        assert_eq!(catalog.accounts[1].catalog, "获取失败");
-        assert_eq!(catalog.accounts[0].state, "无账号");
+        assert_eq!(catalog.accounts.len(), 1);
+        assert_eq!(catalog.accounts[0].state, "暂不可用");
+        assert_eq!(catalog.accounts[0].catalog, "获取失败");
+        assert_eq!(catalog.pools[0].state, "无账号");
+        assert_eq!(catalog.pools[0].account_count, 0);
+        assert_eq!(catalog.pools[1].account_count, 1);
         assert_eq!(catalog.pools.len(), 2);
         assert!(parse(&json!({"data":[]}), &json!({"error":"bad"})).is_err());
     }

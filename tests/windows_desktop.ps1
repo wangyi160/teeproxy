@@ -82,13 +82,13 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(501,502,503,504,505,302,303,304,307,309,310,311)) {
+    foreach ($id in @(501,502,503,504,505,302,303,304,307,309,310,311,312,313,314,315)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
     Select-Page 1
-    if (-not (Control-Shown 302) -or -not (Control-Shown 309) -or -not (Control-Shown 310) -or (Control-Shown 303) -or (Control-Shown 101)) { throw 'Model tab visibility failed' }
+    if (-not (Control-Shown 302) -or -not (Control-Shown 309) -or -not (Control-Shown 310) -or (Control-Shown 303) -or (Control-Shown 312) -or (Control-Shown 101)) { throw 'Model tab visibility failed' }
     Select-Page 2
-    if (-not (Control-Shown 303) -or -not (Control-Shown 311) -or (Control-Shown 302) -or (Control-Shown 309)) { throw 'Account tab visibility failed' }
+    if (-not (Control-Shown 303) -or -not (Control-Shown 312) -or -not (Control-Shown 314) -or -not (Control-Shown 311) -or (Control-Shown 302) -or (Control-Shown 309)) { throw 'Account tab visibility failed' }
     Select-Page 4
     if (-not (Control-Shown 110) -or (Control-Shown 303)) { throw 'Log tab visibility failed' }
     Select-Page 3

@@ -90,6 +90,7 @@ struct App {
     catalog: catalog::Catalog,
     catalog_loaded: bool,
     model_rows: Vec<usize>,
+    account_pool_id: Option<String>,
     inventory_task: Option<JoinHandle<()>>,
     inventory_generation: u64,
     inventory_finished_observed: bool,
@@ -126,6 +127,7 @@ impl App {
             catalog: Default::default(),
             catalog_loaded: false,
             model_rows: Vec::new(),
+            account_pool_id: None,
             inventory_task: None,
             inventory_generation: 0,
             inventory_finished_observed: false,
@@ -864,6 +866,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_DRAWITEM if lp != 0 => {
                 app.draw_button(&*(lp as *const DRAWITEMSTRUCT));
                 return 1;
+            }
+            WM_NOTIFY if lp != 0 => {
+                let header = &*(lp as *const NMHDR);
+                if header.idFrom == POOLS as usize && header.code == LVN_ITEMCHANGED {
+                    let change = &*(lp as *const NMLISTVIEW);
+                    if change.uChanged & LVIF_STATE != 0
+                        && (change.uOldState ^ change.uNewState) & LVIS_SELECTED != 0
+                    {
+                        app.pool_selection_changed();
+                    }
+                }
             }
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
