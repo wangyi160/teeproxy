@@ -654,15 +654,10 @@ mod tests {
                 state.replace_catalog(catalog);
                 SendMessageW(state.by_id[&ROUTE_MODE], CB_SETCURSEL, 1, 0);
                 state.routing_action(ROUTE_MODE).unwrap();
-                SendMessageW(state.by_id[&ROUTE_PROVIDER], CB_SETCURSEL, 1, 0);
-                state.routing_action(ROUTE_PROVIDER).unwrap();
-                state.set(ROUTE_MODEL, "beta");
                 state.set(ROUTE_MAX, "0.25");
                 state.action(ROUTE_SAVE).unwrap();
                 let saved_policy = settings::load(&state.path).unwrap().0.routing;
                 assert!(saved_policy.automatic);
-                assert_eq!(saved_policy.provider, "openai");
-                assert_eq!(saved_policy.model, "beta");
                 assert_eq!(saved_policy.max_multiplier_millionths, 250000);
                 assert_eq!(state.model_pool().unwrap().id, "pool-b");
                 assert_eq!(state.account_pool().unwrap().id, "pool-b");
@@ -706,6 +701,16 @@ mod tests {
                 let index = state.model_rows[0];
                 assert_eq!(state.use_model(index).unwrap(), "beta");
                 assert!(!settings::load(&state.path).unwrap().0.routing.automatic);
+                assert_eq!(
+                    settings::load(&state.path)
+                        .unwrap()
+                        .0
+                        .routing
+                        .max_multiplier_millionths,
+                    250000
+                );
+                assert_ne!(IsWindowEnabled(state.by_id[&ROUTE_MAX]), 0);
+                assert_eq!(IsWindowEnabled(state.by_id[&ROUTE_PRIORITY]), 0);
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 state.task = Some(state.runtime.spawn(std::future::pending::<()>()));
                 state.running = true;

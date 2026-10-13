@@ -637,7 +637,7 @@ impl App {
             REFRESH | COPY_MODEL | USE_POOL | MODEL_POOL | VIEW_POOL_MODELS => {
                 self.inventory_action(id)?
             }
-            ROUTE_MODE..=ROUTE_COPY => self.routing_action(id)?,
+            ROUTE_MODE..=ROUTE_SAVE => self.routing_action(id)?,
             tray::OPEN => tray::restore(self.hwnd),
             tray::TOGGLE => {
                 if self.task.is_some() || self.inventory_task.is_some() {
@@ -907,14 +907,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
-                if [
-                    ROUTE_MODE,
-                    ROUTE_POOL,
-                    ROUTE_PROVIDER,
-                    ROUTE_PRIORITY,
-                    ROUTE_MODEL,
-                ]
-                .contains(&id)
+                if [ROUTE_MODE, ROUTE_POOL, ROUTE_PRIORITY].contains(&id)
                     && notification == CBN_SELCHANGE as u16
                 {
                     if let Err(error) = app.routing_action(id) {

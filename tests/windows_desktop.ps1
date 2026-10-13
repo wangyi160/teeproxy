@@ -82,9 +82,13 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(501,502,503,504,505,506,302,303,304,307,309,310,311,312,313,314,315,601,602,603,604,605,606,607,608,609)) {
+    foreach ($id in @(501,502,503,504,505,506,302,303,304,307,309,310,311,312,313,314,315,601,602,605,606,607,609)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
+    foreach ($id in @(603,604,608)) {
+        if ([TeeproxyUi]::GetDlgItem($script:window,$id) -ne [IntPtr]::Zero) { throw "Removed routing control $id still exists" }
+    }
+    if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,605))) { throw 'Fixed pool maximum is disabled' }
     Select-Page 1
     if (-not (Control-Shown 302) -or -not (Control-Shown 309) -or -not (Control-Shown 310) -or (Control-Shown 303) -or (Control-Shown 312) -or (Control-Shown 101)) { throw 'Model tab visibility failed' }
     Select-Page 2
@@ -93,7 +97,7 @@ try {
     if (-not (Control-Shown 110) -or (Control-Shown 303)) { throw 'Log tab visibility failed' }
     Select-Page 5
     if (-not (Control-Shown 601) -or -not (Control-Shown 602) -or (Control-Shown 303)) { throw 'Routing tab visibility failed' }
-    if ([TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,603))) { throw 'Automatic fields enabled in fixed-pool mode' }
+    if ([TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,606))) { throw 'Automatic fields enabled in fixed-pool mode' }
     Select-Page 3
     Set-Control 101 'https://127.0.0.1:1'
     Set-Control 102 'desktop-smoke-key-not-a-real-credential'

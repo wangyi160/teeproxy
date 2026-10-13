@@ -38,6 +38,7 @@ struct Upstream {
     running: Running,
     calls: Arc<Mutex<Vec<Captured>>>,
     attestations: Arc<AtomicUsize>,
+    quote_version: Arc<AtomicUsize>,
 }
 
 async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> Upstream {
@@ -62,6 +63,8 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
     let captured = calls.clone();
     let attestations = Arc::new(AtomicUsize::new(0));
     let attests = attestations.clone();
+    let quote_version = Arc::new(AtomicUsize::new(7));
+    let quotes = quote_version.clone();
     let task = tokio::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         loop {
@@ -69,11 +72,11 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                 socket = listener.accept() => {
                     let (socket, _) = socket.unwrap();
                     let acceptor = acceptor.clone(); let certificate = certificate.clone();
-                    let captured = captured.clone(); let attests = attests.clone();
+                    let captured = captured.clone(); let attests = attests.clone(); let quotes = quotes.clone();
                     tasks.spawn(async move {
                         let Ok(tls) = acceptor.accept(socket).await else { return; };
                         let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-                            let certificate = certificate.clone(); let captured = captured.clone(); let attests = attests.clone();
+                            let certificate = certificate.clone(); let captured = captured.clone(); let attests = attests.clone(); let quotes = quotes.clone();
                             async move {
                                 let (parts, body) = request.into_parts();
                                 let bytes = to_bytes(Body::new(body), MAX_BODY + 1024).await.unwrap();
@@ -89,11 +92,18 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                     return Ok::<_, Infallible>(Response::new(Body::from(value.to_string())));
                                 }
                                 captured.lock().unwrap().push(Captured { path: parts.uri.to_string(), headers: parts.headers, body: bytes });
-                                if response_mode == "automatic" || response_mode == "automatic-price-changed" {
-                                    let (models, pools) = crate::routing::tests::fixture();
-                                    if parts.uri.path() == "/v1/models" { return Ok(Response::new(Body::from(models.to_string()))); }
+                                if !["catalog", "catalog-denied", "inventory-unavailable"].contains(&response_mode) {
+                                    let (mut models, mut pools) = crate::routing::tests::fixture();
+                                    if quotes.load(Ordering::SeqCst) == 8 {
+                                        pools["data"][1]["multiplier_millionths"] = json!(900000);
+                                        pools["data"][1]["price_version"] = json!(8);
+                                        models["data"][1]["router_pricing"]["version"] = json!(8);
+                                        models["data"][1]["router_pricing"]["rates"][0]["multiplier_millionths"] = json!(900000);
+                                    }
+                                    if parts.uri.path() == "/v1/models" { let mut r = Response::new(Body::from(models.to_string())); *r.status_mut() = hyper::StatusCode::CREATED; return Ok(r); }
                                     if parts.uri.path() == "/v1/pools" { return Ok(Response::new(Body::from(pools.to_string()))); }
-                                    if response_mode == "automatic-price-changed" {
+                                    if response_mode == "automatic-price-changed" || response_mode == "price-race" {
+                                        if response_mode == "price-race" { quotes.store(8, Ordering::SeqCst); }
                                         let mut response = Response::new(Body::from("{\"error\":{\"code\":\"price_changed\"}}"));
                                         *response.status_mut() = hyper::StatusCode::CONFLICT;
                                         return Ok(response);
@@ -144,6 +154,7 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
         running: Running { url, task },
         calls,
         attestations,
+        quote_version,
     }
 }
 
@@ -153,6 +164,7 @@ fn config(upstream: &Upstream) -> Config {
     config.listen = "127.0.0.1:0".parse().unwrap();
     config.tdx_policy = None;
     config.max_in_flight = 1;
+    config.pool = Some("m_a.pool".into());
     config
 }
 
@@ -178,6 +190,145 @@ fn agent() -> reqwest::Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[tokio::test]
+async fn fixed_pool_reads_latest_multiplier_before_each_request_and_cannot_escape_cap() {
+    let upstream = upstream("teeproxy-unit-test", "automatic").await;
+    let mut config = config(&upstream);
+    config.pool = Some("m_b.pool".into());
+    config.routing.max_multiplier_millionths = 500000;
+    let gateway = proxy(config, true, None).await;
+    let body = r#"{ "model":"model-a", "input":"exact bytes" }"#;
+    let response = agent()
+        .post(format!("{}/v1/responses", gateway.url))
+        .header("x-router-pool", "m_a.pool")
+        .header("x-router-account", "bypass")
+        .header("x-router-price-version", "1")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    assert_eq!(response.headers()["x-teeproxy-pool"], "m_b.pool");
+    assert_eq!(response.headers()["x-teeproxy-multiplier"], "0.5");
+    response.bytes().await.unwrap();
+    // The merchant changes its multiplier while the same local proxy is running.
+    upstream.quote_version.store(8, Ordering::SeqCst);
+    let response = agent()
+        .post(format!("{}/v1/responses", gateway.url))
+        .header("x-router-pool", "m_a.pool")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 403);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("routing_multiplier_exceeded")
+    );
+    let calls = upstream.calls.lock().unwrap();
+    assert_eq!(calls.len(), 5); // Two fresh inventories; only the first generation was sent.
+    let generated: Vec<_> = calls.iter().filter(|c| c.path == "/v1/responses").collect();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].body, body);
+    assert_eq!(generated[0].headers["x-router-pool"], "m_b.pool");
+    assert_eq!(generated[0].headers["x-router-price-version"], "7");
+    assert!(!generated[0].headers.contains_key("x-router-account"));
+}
+
+#[tokio::test]
+async fn fixed_pool_price_race_is_version_bound_never_replayed_and_next_request_is_blocked() {
+    let upstream = upstream("teeproxy-unit-test", "price-race").await;
+    let mut config = config(&upstream);
+    config.pool = Some("m_b.pool".into());
+    config.routing.max_multiplier_millionths = 500000;
+    let gateway = proxy(config, true, None).await;
+    for status in [409, 403] {
+        let response = agent()
+            .post(format!("{}/v1/responses", gateway.url))
+            .json(&json!({"model":"model-a"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        response.bytes().await.unwrap();
+    }
+    let calls = upstream.calls.lock().unwrap();
+    let generated: Vec<_> = calls.iter().filter(|c| c.path == "/v1/responses").collect();
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].headers["x-router-price-version"], "7");
+}
+
+#[tokio::test]
+async fn fixed_pool_missing_quote_model_protocol_or_selection_never_forwards_generation() {
+    for (mode, pool, path, body, status, error) in [
+        (
+            "inventory-unavailable",
+            Some("m_b.pool"),
+            "/v1/responses",
+            json!({"model":"model-a"}),
+            503,
+            "routing_inventory_unavailable",
+        ),
+        (
+            "automatic",
+            Some("m_b.pool"),
+            "/v1/responses",
+            json!({"model":"unknown"}),
+            503,
+            "routing_no_matching_pool",
+        ),
+        (
+            "automatic",
+            Some("m_b.pool"),
+            "/v1/messages",
+            json!({"model":"model-a"}),
+            503,
+            "routing_no_matching_pool",
+        ),
+        (
+            "automatic",
+            Some("m_b.pool"),
+            "/v1/responses",
+            json!({"model":"m_a/model-a"}),
+            503,
+            "routing_no_matching_pool",
+        ),
+        (
+            "automatic",
+            None,
+            "/v1/responses",
+            json!({"model":"model-a"}),
+            400,
+            "routing_pool_required",
+        ),
+    ] {
+        let upstream = upstream("teeproxy-unit-test", mode).await;
+        let mut config = config(&upstream);
+        config.pool = pool.map(String::from);
+        let gateway = proxy(config, true, None).await;
+        let response = agent()
+            .post(format!("{}{path}", gateway.url))
+            .header("x-router-pool", "m_a.pool")
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert!(response.text().await.unwrap().contains(error));
+        assert!(
+            upstream
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|c| c.body.is_empty())
+        );
+    }
 }
 
 #[tokio::test]
@@ -427,7 +578,7 @@ async fn shutdown_closes_active_streams_and_releases_the_listener() {
     }));
     let mut response = agent()
         .post(format!("http://{address}/v1/responses"))
-        .body("{}")
+        .body(r#"{"model":"model-a"}"#)
         .send()
         .await
         .unwrap();
@@ -452,10 +603,10 @@ async fn shutdown_closes_active_streams_and_releases_the_listener() {
 async fn local_api_verifies_once_preserves_bytes_headers_and_reuses_the_attested_channel() {
     let upstream = upstream("teeproxy-unit-test", "json").await;
     let mut config = config(&upstream);
-    config.pool = Some("selected-pool".into());
+    config.pool = Some("m_a.pool".into());
     let proxy = proxy(config, true, None).await;
     let agent = agent();
-    let raw = "{ \"model\":\"literal-model-id\", \"input\":\"hello 世界\", \"stream\":true }";
+    let raw = "{ \"model\":\"model-a\", \"input\":\"hello 世界\", \"stream\":true }";
     for _ in 0..2 {
         let response = agent
             .post(format!("{}/v1/responses?beta=true", proxy.url))
@@ -475,8 +626,8 @@ async fn local_api_verifies_once_preserves_bytes_headers_and_reuses_the_attested
     }
     assert_eq!(upstream.attestations.load(Ordering::SeqCst), 1);
     let calls = upstream.calls.lock().unwrap();
-    assert_eq!(calls.len(), 2);
-    for call in calls.iter() {
+    assert_eq!(calls.len(), 6);
+    for call in calls.iter().filter(|c| c.path.starts_with("/v1/responses")) {
         assert_eq!(call.path, "/v1/responses?beta=true");
         assert_eq!(call.body, raw);
         assert_eq!(
@@ -484,7 +635,7 @@ async fn local_api_verifies_once_preserves_bytes_headers_and_reuses_the_attested
             "Bearer router-key-not-provider-key"
         );
         assert_eq!(call.headers["anthropic-version"], "2023-06-01");
-        assert_eq!(call.headers["x-router-pool"], "selected-pool");
+        assert_eq!(call.headers["x-router-pool"], "m_a.pool");
         for name in ["cookie", "x-api-key", "proxy-authorization"] {
             assert!(!call.headers.contains_key(name));
         }
@@ -503,7 +654,7 @@ async fn sample_evidence_bad_binding_and_empty_trust_send_no_business_data() {
         let proxy = proxy(config(&upstream), allow_test, None).await;
         let response = agent()
             .post(format!("{}/v1/messages", proxy.url))
-            .body("never-forward-this-prompt")
+            .body(r#"{"model":"model-a","input":"never-forward-this-prompt"}"#)
             .send()
             .await
             .unwrap();
@@ -527,7 +678,7 @@ async fn sse_is_not_buffered_and_concurrency_is_held_until_stream_finishes() {
     let agent = agent();
     let mut response = agent
         .post(format!("{}/v1/responses", proxy.url))
-        .body("{}")
+        .body(r#"{"model":"model-a"}"#)
         .send()
         .await
         .unwrap();
@@ -541,7 +692,7 @@ async fn sse_is_not_buffered_and_concurrency_is_held_until_stream_finishes() {
     );
     let busy = agent
         .post(format!("{}/v1/responses", proxy.url))
-        .body("{}")
+        .body(r#"{"model":"model-a"}"#)
         .send()
         .await
         .unwrap();
@@ -549,7 +700,7 @@ async fn sse_is_not_buffered_and_concurrency_is_held_until_stream_finishes() {
     assert_eq!(response.text().await.unwrap(), "data: [DONE]\n\n");
     let response = agent
         .post(format!("{}/v1/responses", proxy.url))
-        .body("{}")
+        .body(r#"{"model":"model-a"}"#)
         .send()
         .await
         .unwrap();
@@ -565,7 +716,7 @@ async fn streaming_cancellation_discards_connection_and_releases_capacity() {
     let agent = agent();
     let mut response = agent
         .post(format!("{}/v1/responses", proxy.url))
-        .body("{}")
+        .body(r#"{"model":"model-a"}"#)
         .send()
         .await
         .unwrap();
@@ -575,7 +726,7 @@ async fn streaming_cancellation_discards_connection_and_releases_capacity() {
         loop {
             let response = agent
                 .post(format!("{}/v1/responses", proxy.url))
-                .body("{}")
+                .body(r#"{"model":"model-a"}"#)
                 .send()
                 .await
                 .unwrap();
@@ -597,7 +748,8 @@ async fn local_api_gzip_preserves_decompressed_bytes() {
     let upstream = upstream("teeproxy-unit-test", "json").await;
     let proxy = proxy(config(&upstream), true, None).await;
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    gzip.write_all(b"{ \"input\": \"exact bytes\" }").unwrap();
+    gzip.write_all(b"{ \"model\":\"model-a\", \"input\": \"exact bytes\" }")
+        .unwrap();
     let response = agent()
         .post(format!("{}/v1/responses", proxy.url))
         .header("content-encoding", "gzip")
@@ -608,9 +760,13 @@ async fn local_api_gzip_preserves_decompressed_bytes() {
     assert_eq!(response.status(), 201);
     response.bytes().await.unwrap();
     let calls = upstream.calls.lock().unwrap();
-    assert_eq!(calls[0].path, "/v1/responses");
-    assert_eq!(calls[0].body, "{ \"input\": \"exact bytes\" }");
-    assert!(!calls[0].headers.contains_key("content-encoding"));
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[2].path, "/v1/responses");
+    assert_eq!(
+        calls[2].body,
+        "{ \"model\":\"model-a\", \"input\": \"exact bytes\" }"
+    );
+    assert!(!calls[2].headers.contains_key("content-encoding"));
 }
 
 #[tokio::test]
@@ -630,7 +786,7 @@ async fn proxy_targets_admin_paths_query_credentials_and_websockets_are_blocked(
         assert_eq!(
             agent
                 .post(format!("{}{path}", proxy.url))
-                .body("{}")
+                .body(r#"{"model":"model-a"}"#)
                 .send()
                 .await
                 .unwrap()
@@ -755,7 +911,7 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
             agent
                 .post(&url)
                 .header("host", host)
-                .body("{}")
+                .body(r#"{"model":"model-a"}"#)
                 .send()
                 .await
                 .unwrap()
@@ -767,7 +923,7 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
         agent
             .post(&url)
             .header("origin", "https://example.com")
-            .body("{}")
+            .body(r#"{"model":"model-a"}"#)
             .send()
             .await
             .unwrap()
@@ -802,7 +958,7 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
         agent
             .post(&url)
             .header("content-encoding", "br")
-            .body("{}")
+            .body(r#"{"model":"model-a"}"#)
             .send()
             .await
             .unwrap()
@@ -822,7 +978,7 @@ async fn idle_stream_timeout_closes_channel_and_releases_capacity() {
     let agent = agent();
     let mut response = agent
         .post(format!("{}/v1/responses", proxy.url))
-        .body("{}")
+        .body(r#"{"model":"model-a"}"#)
         .send()
         .await
         .unwrap();
@@ -835,7 +991,7 @@ async fn idle_stream_timeout_closes_channel_and_releases_capacity() {
     );
     let response = agent
         .post(format!("{}/v1/responses", proxy.url))
-        .body("{}")
+        .body(r#"{"model":"model-a"}"#)
         .send()
         .await
         .unwrap();
@@ -844,7 +1000,7 @@ async fn idle_stream_timeout_closes_channel_and_releases_capacity() {
 }
 
 #[tokio::test]
-async fn native_gemini_path_is_forwarded_without_model_rewriting() {
+async fn unsupported_generation_protocol_cannot_bypass_price_checks() {
     let upstream = upstream("teeproxy-unit-test", "json").await;
     let proxy = proxy(config(&upstream), true, None).await;
     let response = agent()
@@ -852,17 +1008,17 @@ async fn native_gemini_path_is_forwarded_without_model_rewriting() {
             "{}/v1beta/models/model-id:streamGenerateContent?alt=sse",
             proxy.url
         ))
-        .header("x-goog-api-key", "agent-secret")
         .body("{}")
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 201);
-    response.bytes().await.unwrap();
-    let calls = upstream.calls.lock().unwrap();
-    assert_eq!(
-        calls[0].path,
-        "/v1beta/models/model-id:streamGenerateContent?alt=sse"
+    assert_eq!(response.status(), 400);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("routing_unsupported_protocol")
     );
-    assert!(!calls[0].headers.contains_key("x-goog-api-key"));
+    assert!(upstream.calls.lock().unwrap().is_empty());
 }

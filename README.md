@@ -20,7 +20,7 @@ agent 通过 base URL 直连本机的 teeproxy。默认入口使用回环 HTTP�
 - **概览**：查看本地 `/v1` 地址、上游地址及模型和账号池数量，点击“复制地址”用于 agent 的 base URL。
 - **模型 / 账号池**：按账号池浏览当前 key 可访问的模型，查看商户、倍率、上游账号与可用状态。选择模型后，“使用此池并复制模型”会保存对应账号池并复制模型 ID；切换运行中的账号池须先停止代理。倍率由商户按池设置，1× 表示官方基准价，0.2× 表示其 20%；Workbuddy 使用测试基准。刷新前先通过 TEE 验证。
 - **账号池与账号明细**：账号池页采用上下两个联动列表。上方每个池一行，显示商户、倍率、账号数量、供应商和状态；点击池后，下方仅显示该池的账号、可用状态和模型目录。账号数量包含停用账号，空池显示 0。
-- **路由策略**：指定一个账号池，或按模型大类、具体模型、倍率上限自动匹配。费率优先选择最低倍率；速率优先按真实流式请求的首字时间及生成速度选择。模型可跟随 Agent 请求；不修改请求模型或正文。无匹配池会报错，自动请求绑定报价版本以防倍率在选池后变化。当前策略与实际选择会在界面显示。
+- **路由策略**：指定一个账号池，或按 Agent 请求的模型自动匹配。两种模式都受倍率上限约束，每次生成前读取最新可信报价；超限即拒绝转发，并绑定报价版本防止检查后涨价。费率优先选择最低倍率；速率优先按真实流式请求的首字时间及生成速度选择。不修改请求模型或正文，当前策略与实际选择会在界面显示。
 - **系统托盘**：最小化或关闭窗口后继续转发；点击托盘图标恢复，右键选择“退出 teeproxy”结束程序。
 
 Windows 发行包见 [Releases](https://github.com/wangyi160/teeproxy/releases)。具体操作、配置保存位置和后台行为见 [桌面版说明](docs/DESKTOP.md)。
@@ -57,7 +57,6 @@ Windows 构建需要 Windows SDK（MSVC）或 MinGW 资源编译器。`cargo bui
 | --- | --- |
 | Codex / OpenAI 兼容客户端 | `http://127.0.0.1:8899/v1` |
 | Claude Code | `ANTHROPIC_BASE_URL=http://127.0.0.1:8899`，SDK 自动添加 `/v1/messages` |
-| Gemini 兼容客户端 | 将 API 根地址指向 `http://127.0.0.1:8899`，调用 `/v1beta/models/...` |
 
 Codex：将 [provider 示例](examples/codex.config.toml) 合并到用户配置，设置 `TEEPROXY_AGENT_KEY=teeproxy-local`，再运行 `codex --profile teeproxy --model <router模型ID>`。示例使用 HTTP Responses/SSE。
 
@@ -68,10 +67,10 @@ agent 的占位 key 会被移除。真实 router key 由 teeproxy 管理，agent
 ## 行为和范围
 
 - 原样转发允许接口的方法、路径、查询参数、JSON 字节和兼容头；不修改模型、prompt、tools 或 tool_choice。
-- 清理逐跳头、agent 认证和 Cookie，设置 router key；可用配置中的 `pool` 选择账号池。
+- 清理逐跳头、agent 认证和 Cookie，设置 router key；生成请求须配置固定 `pool` 或启用自动匹配，默认倍率上限为 1×。调用方的池、账号及报价版本头不能绕过该策略。
 - 响应状态和数据逐块转发，支持 SSE；取消、错误或超时关闭对应上游连接。已发出的请求不会自动重放。
 - 仅监听本机回环地址，核对 Host 和端口，拒绝浏览器跨域请求、CONNECT、代理形式的目标 URL、管理接口和 URL 凭证。
-- 支持模型/账号池/用量查询、Chat Completions、Responses、Messages、Gemini 生成以及经验证的 router 健康查询。
+- 支持模型/账号池/用量查询、Chat Completions、Responses、Messages 以及经验证的 router 健康查询。其他生成协议无法校验报价，拒绝转发。
 - 请求体及 gzip 解压后均限制为 2 MiB，默认 16 个并发请求和 128 个客户端连接，流空闲超时默认 120 秒。
 
 当前不支持 WebSocket、远程 compaction、Claude token-counting 接口或协议转换。agent 的具体功能取决于 router 提供的接口与模型；不会伪造未实现接口的成功响应。部署和本机信任边界见 [安全说明](docs/SECURITY.md)。

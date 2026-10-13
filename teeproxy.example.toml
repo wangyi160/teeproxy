@@ -6,16 +6,14 @@ router_key_env = "TEEPROXY_ROUTER_KEY"
 tdx_policy = "policy/tdx-deny-all.json"
 # Optional separate local API key; send as Bearer, x-api-key or x-goog-api-key.
 # client_key_env = "TEEPROXY_CLIENT_KEY"
-# Optional upstream account pool, shared by this gateway's requests.
-# pool = "selected-pool"
+# Required for generation in fixed mode; use the full ID from /v1/pools.
+# pool = "m_MERCHANT.selected-pool"
 max_in_flight = 16
 max_connections = 128
 stream_idle_secs = 120
 
-# Optional automatic routing. Uses only the attested, authorized inventory.
+# Both modes read fresh attested quotes and enforce a maximum (default 1x).
 # [routing]
-# automatic = true
-# provider = "openai" # openai, claude, grok, workbuddy; empty = official only
-# model = "" # empty follows the agent; a value restricts, never rewrites, its model
+# automatic = false # true selects an authorized pool for the agent's exact model
 # max_multiplier_millionths = 500000 # maximum 0.5x the official base price
 # priority = "price" # price or speed (passive measurements of real streaming calls)

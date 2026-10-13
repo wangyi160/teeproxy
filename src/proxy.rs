@@ -302,15 +302,20 @@ impl Proxy {
             Ok(data) => data,
             Err(code) => return failure(code, "invalid_content_encoding_or_body_limit"),
         };
-        let automatic = self.config.routing.automatic && parts.method == Method::POST;
-        let route_model = if automatic {
+        let route_model = if parts.method == Method::POST {
             let Some(protocol) = crate::routing::protocol(uri.path()) else {
-                return failure(400, "automatic_routing_unsupported_protocol");
+                return failure(400, "routing_unsupported_protocol");
             };
+            if !self.config.routing.automatic && self.config.pool.is_none() {
+                return failure(400, "routing_pool_required");
+            }
             let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
                 return failure(400, "routing_invalid_request");
             };
-            let Some(model) = value["model"].as_str().filter(|m| !m.is_empty()) else {
+            let Some(model) = value["model"]
+                .as_str()
+                .filter(|m| !m.is_empty() && m.len() <= 640 && !m.chars().any(char::is_control))
+            else {
                 return failure(400, "routing_model_required");
             };
             Some((model.to_owned(), protocol))
@@ -332,22 +337,33 @@ impl Proxy {
                 Ok(rows) => rows,
                 Err(_) => {
                     self.routing
-                        .notify("自动匹配失败：无法读取可信目录，未转发请求".into());
+                        .notify("路由检查失败：无法读取可信报价，未转发请求".into());
                     return failure(503, "routing_inventory_unavailable");
                 }
             };
-            match self
-                .routing
-                .choose(&rows, &self.config.routing, &model, protocol)
-            {
+            match self.routing.choose(
+                &rows,
+                &self.config.routing,
+                &model,
+                protocol,
+                if self.config.routing.automatic {
+                    None
+                } else {
+                    self.config.pool.as_deref()
+                },
+            ) {
                 Ok(observation) => Some(observation),
                 Err(code) => {
                     self.routing
-                        .notify(format!("自动匹配失败：{code}，未转发请求"));
+                        .notify(if code == "routing_multiplier_exceeded" {
+                            "指定账号池的当前倍率超过上限，未转发请求".into()
+                        } else {
+                            format!("路由检查失败：{code}，未转发请求")
+                        });
                     self.pool.put(session);
                     return failure(
-                        if code == "routing_model_mismatch" {
-                            400
+                        if code == "routing_multiplier_exceeded" {
+                            403
                         } else {
                             503
                         },
@@ -392,9 +408,6 @@ impl Proxy {
                 return failure(502, "router_connection_failed_request_not_replayed");
             }
         };
-        if measurement.is_some() && response.status() == StatusCode::CONFLICT {
-            self.routing.invalidate().await;
-        }
         let (parts, body) = response.into_parts();
         if let Some(measurement) = &mut measurement {
             measurement.response(

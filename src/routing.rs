@@ -21,22 +21,49 @@ pub enum Priority {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(from = "PolicyInput")]
 pub struct Policy {
     pub automatic: bool,
-    /// Empty selects official providers only. Workbuddy must be chosen explicitly.
-    pub provider: String,
-    /// Empty follows the agent's exact model ID; a value restricts it, never rewrites it.
-    pub model: String,
     pub max_multiplier_millionths: u64,
     pub priority: Priority,
+}
+// Accept and discard the removed v0.10 selectors, including in DPAPI desktop profiles.
+// They must never survive as invisible routing constraints or be saved again.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PolicyInput {
+    automatic: bool,
+    max_multiplier_millionths: u64,
+    priority: Priority,
+    #[serde(rename = "provider")]
+    _provider: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "model")]
+    _model: Option<serde::de::IgnoredAny>,
+}
+impl Default for PolicyInput {
+    fn default() -> Self {
+        Self {
+            automatic: false,
+            max_multiplier_millionths: 1_000_000,
+            priority: Priority::Price,
+            _provider: None,
+            _model: None,
+        }
+    }
+}
+impl From<PolicyInput> for Policy {
+    fn from(input: PolicyInput) -> Self {
+        Self {
+            automatic: input.automatic,
+            max_multiplier_millionths: input.max_multiplier_millionths,
+            priority: input.priority,
+        }
+    }
 }
 impl Default for Policy {
     fn default() -> Self {
         Self {
             automatic: false,
-            provider: String::new(),
-            model: String::new(),
             max_multiplier_millionths: 1_000_000,
             priority: Priority::Price,
         }
@@ -44,14 +71,6 @@ impl Default for Policy {
 }
 impl Policy {
     pub fn validate(&self) -> Result<()> {
-        ensure!(
-            ["", "openai", "claude", "grok", "workbuddy"].contains(&self.provider.as_str()),
-            "Invalid routing provider"
-        );
-        ensure!(
-            self.model.len() <= 512 && !self.model.chars().any(char::is_control),
-            "Invalid routing model"
-        );
         ensure!(
             self.max_multiplier_millionths <= 1_000_000_000_000_000,
             "Invalid maximum multiplier"
@@ -246,7 +265,6 @@ type Observer = Arc<dyn Fn(String) + Send + Sync>;
 pub(crate) struct State {
     history: Mutex<HashMap<String, Metric>>,
     observer: Mutex<Option<Observer>>,
-    cache: tokio::sync::Mutex<Option<(Instant, Vec<Candidate>)>>,
 }
 impl State {
     pub fn observe(&self, observer: Observer) {
@@ -263,14 +281,8 @@ impl State {
         session: &mut VerifiedSession,
         auth: &HeaderValue,
     ) -> Result<Vec<Candidate>> {
-        let mut cache = self.cache.lock().await;
-        if let Some((at, rows)) = cache
-            .as_ref()
-            .filter(|(at, _)| at.elapsed() < Duration::from_secs(30))
-        {
-            let _ = at;
-            return Ok(rows.clone());
-        }
+        // Read a fresh quote before every generation. The router checks its version
+        // again at admission, closing the race between this read and forwarding.
         let mut values = Vec::new();
         for path in ["/v1/models", "/v1/pools"] {
             let mut request = Request::new(Full::new(Bytes::new()));
@@ -290,12 +302,7 @@ impl State {
             .to_bytes();
             values.push(serde_json::from_slice(&bytes)?);
         }
-        let rows = candidates(&values[0], &values[1])?;
-        *cache = Some((Instant::now(), rows.clone()));
-        Ok(rows)
-    }
-    pub async fn invalidate(&self) {
-        *self.cache.lock().await = None;
+        candidates(&values[0], &values[1])
     }
     pub fn choose(
         self: &Arc<Self>,
@@ -303,28 +310,31 @@ impl State {
         policy: &Policy,
         model: &str,
         protocol: &str,
+        fixed_pool: Option<&str>,
     ) -> Result<Observation, &'static str> {
         let (merchant, model) = model
             .split_once('/')
             .filter(|(m, _)| m.starts_with("m_"))
             .map_or((None, model), |(m, id)| (Some(m), id));
-        if !policy.model.is_empty() && model != policy.model {
-            return Err("routing_model_mismatch");
-        }
         let mut eligible = rows
             .iter()
             .filter(|c| {
                 c.model == model
                     && c.protocol == protocol
                     && merchant.is_none_or(|m| m == c.merchant)
-                    && c.multiplier <= policy.max_multiplier_millionths
-                    && if policy.provider.is_empty() {
-                        ["openai", "claude", "grok"].contains(&c.provider.as_str())
-                    } else {
-                        c.provider == policy.provider
-                    }
+                    && fixed_pool.is_none_or(|pool| c.pool == pool)
+                    && ["openai", "claude", "grok", "workbuddy"].contains(&c.provider.as_str())
             })
             .collect::<Vec<_>>();
+        if fixed_pool.is_some()
+            && !eligible.is_empty()
+            && eligible
+                .iter()
+                .all(|c| c.multiplier > policy.max_multiplier_millionths)
+        {
+            return Err("routing_multiplier_exceeded");
+        }
+        eligible.retain(|c| c.multiplier <= policy.max_multiplier_millionths);
         let mut history = self.history.lock().unwrap();
         // Bound memory to entries still present in the authenticated inventory.
         if history.len() > 30000 {
@@ -332,9 +342,10 @@ impl State {
         }
         let now = Instant::now();
         eligible.retain(|c| {
-            !history
-                .get(&c.key())
-                .is_some_and(|m| m.cooldown.is_some_and(|until| until > now))
+            fixed_pool.is_some()
+                || !history
+                    .get(&c.key())
+                    .is_some_and(|m| m.cooldown.is_some_and(|until| until > now))
         });
         let metric = |c: &Candidate| history.get(&c.key());
         let fresh = |c: &Candidate| {
@@ -392,11 +403,16 @@ impl State {
         let sampled = entry.sampled.is_some();
         drop(history);
         self.notify(format!(
-            "自动匹配 → {} · {} · {}×{}",
+            "{} → {} · {} · {}×{}",
+            if fixed_pool.is_some() {
+                "指定账号池"
+            } else {
+                "自动匹配"
+            },
             candidate.label,
             candidate.model,
             format_multiplier(candidate.multiplier),
-            if policy.priority == Priority::Speed && !sampled {
+            if fixed_pool.is_none() && policy.priority == Priority::Speed && !sampled {
                 " · 积累测速样本"
             } else {
                 ""
@@ -650,7 +666,7 @@ pub(crate) mod tests {
         };
         assert_eq!(
             state
-                .choose(&rows, &policy, "model-a", "responses")
+                .choose(&rows, &policy, "model-a", "responses", None)
                 .unwrap()
                 .candidate
                 .pool,
@@ -658,7 +674,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state
-                .choose(&rows, &policy, "m_b/model-a", "responses")
+                .choose(&rows, &policy, "m_b/model-a", "responses", None)
                 .unwrap()
                 .candidate
                 .pool,
@@ -666,45 +682,80 @@ pub(crate) mod tests {
         );
         assert!(
             state
-                .choose(&rows, &policy, "m_c/model-a", "responses")
+                .choose(&rows, &policy, "m_c/model-a", "responses", None)
                 .is_err()
         );
-        assert!(state.choose(&rows, &policy, "model-a", "messages").is_err());
+        assert!(
+            state
+                .choose(&rows, &policy, "model-a", "messages", None)
+                .is_err()
+        );
         policy.max_multiplier_millionths = 199999;
         assert!(
             state
-                .choose(&rows, &policy, "model-a", "responses")
+                .choose(&rows, &policy, "model-a", "responses", None)
                 .is_err()
         );
         policy.max_multiplier_millionths = 1000000;
-        policy.provider = "claude".into();
+        assert_eq!(
+            state
+                .choose(&rows, &policy, "model-a", "responses", Some("m_b.pool"))
+                .unwrap()
+                .candidate
+                .pool,
+            "m_b.pool"
+        );
+        policy.max_multiplier_millionths = 499999;
+        assert_eq!(
+            state
+                .choose(&rows, &policy, "model-a", "responses", Some("m_b.pool"))
+                .err(),
+            Some("routing_multiplier_exceeded")
+        );
+        policy.max_multiplier_millionths = 500000;
         assert!(
             state
-                .choose(&rows, &policy, "model-a", "responses")
-                .is_err()
+                .choose(&rows, &policy, "model-a", "responses", Some("m_b.pool"))
+                .is_ok()
         );
-        policy.provider.clear();
-        policy.model = "another-model".into();
-        assert_eq!(
-            state.choose(&rows, &policy, "model-a", "responses").err(),
-            Some("routing_model_mismatch")
+        assert!(
+            state
+                .choose(&rows, &policy, "m_a/model-a", "responses", Some("m_b.pool"))
+                .is_err()
         );
         let mut test_rows = rows;
         for r in &mut test_rows {
             r.provider = "workbuddy".into();
         }
-        policy.model.clear();
         assert!(
             state
-                .choose(&test_rows, &policy, "model-a", "responses")
-                .is_err()
-        );
-        policy.provider = "workbuddy".into();
-        assert!(
-            state
-                .choose(&test_rows, &policy, "model-a", "responses")
+                .choose(&test_rows, &policy, "model-a", "responses", None)
                 .is_ok()
         );
+    }
+    #[test]
+    fn old_selectors_are_ignored_and_not_saved_but_the_limit_is_preserved() {
+        let policy: Policy = serde_json::from_value(json!({"automatic":true,"provider":"claude","model":"old-model","max_multiplier_millionths":250000,"priority":"speed"})).unwrap();
+        assert!(policy.automatic && policy.priority == Priority::Speed);
+        assert_eq!(policy.max_multiplier_millionths, 250000);
+        let saved = serde_json::to_value(&policy).unwrap();
+        assert!(saved.get("model").is_none() && saved.get("provider").is_none());
+        let (models, pools) = fixture();
+        assert!(
+            Arc::new(State::default())
+                .choose(
+                    &candidates(&models, &pools).unwrap(),
+                    &policy,
+                    "model-a",
+                    "responses",
+                    None
+                )
+                .is_ok()
+        );
+        let policy: Policy = toml::from_str("automatic = false\nprovider = 'grok'\nmodel = 'old'\nmax_multiplier_millionths = 500000").unwrap();
+        assert!(!policy.automatic);
+        assert_eq!(policy.max_multiplier_millionths, 500000);
+        assert!(toml::from_str::<Policy>("max_multipler = 1").is_err());
     }
     #[test]
     fn speed_uses_real_content_not_headers_and_explores_unmeasured_pools() {
@@ -717,10 +768,10 @@ pub(crate) mod tests {
             ..Default::default()
         };
         let mut first = state
-            .choose(&rows, &policy, "model-a", "responses")
+            .choose(&rows, &policy, "model-a", "responses", None)
             .unwrap();
         let second = state
-            .choose(&rows, &policy, "model-a", "responses")
+            .choose(&rows, &policy, "model-a", "responses", None)
             .unwrap();
         assert_ne!(first.candidate.pool, second.candidate.pool);
         first.response(200, true);
@@ -747,7 +798,7 @@ pub(crate) mod tests {
             },
         );
         let chosen = state
-            .choose(&rows, &policy, "model-a", "responses")
+            .choose(&rows, &policy, "model-a", "responses", None)
             .unwrap();
         assert_eq!(chosen.candidate.key(), b);
         drop(chosen);
@@ -755,7 +806,7 @@ pub(crate) mod tests {
             Some(Instant::now() - Duration::from_secs(601));
         assert_eq!(
             state
-                .choose(&rows, &policy, "model-a", "responses")
+                .choose(&rows, &policy, "model-a", "responses", None)
                 .unwrap()
                 .candidate
                 .key(),
@@ -769,7 +820,7 @@ pub(crate) mod tests {
         let state = Arc::new(State::default());
         let policy = Policy::default();
         let mut observation = state
-            .choose(&rows, &policy, "model-a", "chat_completions")
+            .choose(&rows, &policy, "model-a", "chat_completions", None)
             .unwrap();
         let key = observation.candidate.key();
         observation.response(200, true);
@@ -784,7 +835,7 @@ pub(crate) mod tests {
         assert!(state.history.lock().unwrap()[&key].first.is_none());
         assert_eq!(state.history.lock().unwrap()[&key].in_flight, 0);
         let mut observation = state
-            .choose(&rows, &policy, "model-a", "chat_completions")
+            .choose(&rows, &policy, "model-a", "chat_completions", None)
             .unwrap();
         observation.response(200, true);
         observation.feed(b"data: {\"type\":\"error\",\"error\":{}}\n\n");
@@ -792,14 +843,14 @@ pub(crate) mod tests {
         drop(observation);
         assert_ne!(
             state
-                .choose(&rows, &policy, "model-a", "chat_completions")
+                .choose(&rows, &policy, "model-a", "chat_completions", None)
                 .unwrap()
                 .candidate
                 .key(),
             key
         );
         let mut observation = state
-            .choose(&rows, &policy, "model-a", "responses")
+            .choose(&rows, &policy, "model-a", "responses", None)
             .unwrap();
         observation.response(200, true);
         observation.feed(&vec![b'x'; MAX_BODY + 1]);
@@ -812,7 +863,7 @@ pub(crate) mod tests {
         let state = Arc::new(State::default());
         let policy = Policy::default();
         let mut observation = state
-            .choose(&rows, &policy, "model-a", "responses")
+            .choose(&rows, &policy, "model-a", "responses", None)
             .unwrap();
         let key = observation.candidate.key();
         observation.response(200, true);
@@ -827,7 +878,7 @@ pub(crate) mod tests {
         assert!(state.history.lock().unwrap()[&key].first.is_some());
         assert!(state.history.lock().unwrap()[&key].tokens_per_sec.is_none());
         let mut nonstream = state
-            .choose(&rows, &policy, "model-a", "chat_completions")
+            .choose(&rows, &policy, "model-a", "chat_completions", None)
             .unwrap();
         nonstream.response(200, false);
         nonstream.feed(b"{\"choices\":[{\"message\":{\"content\":\"hello\"}}],\"usage\":{\"completion_tokens\":100}}");
