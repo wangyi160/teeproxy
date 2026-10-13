@@ -50,6 +50,12 @@ claude --model YOUR_ROUTER_MODEL_ID
 
 使用 API-key 模式。若现有环境还设置了 `ANTHROPIC_AUTH_TOKEN` 或其他认证助手，应避免它们覆盖本地 key；认证选择见 [Claude Code 官方网关说明](https://code.claude.com/docs/en/llm-gateway)。teeproxy 支持标准 Bearer 和 `x-api-key` 认证头。
 
+## VS Code Copilot 的自定义模型
+
+在 OpenAI 兼容提供商中将 API Base URL 设为 `http://127.0.0.1:8899/v1`，模型 ID 从 teeproxy 模型列表复制，并选择模型支持的接口。当前 Workbuddy 测试池仅支持 Chat Completions；Responses 和 Messages 需要各自兼容的官方账号池。
+
+本地 key 未启用时可填 `teeproxy-local`；启用后须填写相同的本地 key。v0.12.2 修复了 Electron 原生 fetch 携带 `Sec-Fetch-Site: none` 时被误报为 `browser_request_rejected` 的问题，无需修改 Copilot 的网络组件或关闭跨站请求限制。
+
 ## 可选本地认证
 
 默认不校验本地 API key，能访问监听地址的本机进程均可使用网关。agent 要求填写 key 时可以使用上述占位值。若需单独的本地访问密钥，在 `teeproxy.toml` 设置：

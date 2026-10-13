@@ -882,6 +882,180 @@ async fn plaintext_router_url_never_yields_a_verified_session() {
 }
 
 #[tokio::test]
+async fn electron_native_fetch_metadata_allows_copilot_and_preserves_local_auth() {
+    for key in [None, Some("local-key-at-least-16-characters")] {
+        let upstream = upstream("teeproxy-unit-test", "json").await;
+        let gateway = proxy(config(&upstream), true, key).await;
+        let client = agent();
+        let url = format!("{}/v1/chat/completions", gateway.url);
+        for mode in ["no-cors", "cors", "same-origin"] {
+            let body = r#"{ "model":"model-a", "messages":[{"role":"user","content":"hello"}] }"#;
+            let response = client
+                .post(&url)
+                .header(
+                    "authorization",
+                    format!("Bearer {}", key.unwrap_or("teeproxy-local")),
+                )
+                .header("user-agent", "GitHubCopilotChat/test")
+                .header("x-vscode-user-agent-library-version", "electron-fetch")
+                .header("sec-fetch-site", "none")
+                .header("sec-fetch-mode", mode)
+                .header("sec-fetch-dest", "empty")
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 201);
+            response.bytes().await.unwrap();
+            let calls = upstream.calls.lock().unwrap();
+            let sent = calls.last().unwrap();
+            assert_eq!(sent.path, "/v1/chat/completions");
+            assert_eq!(sent.body, body);
+            assert_eq!(
+                sent.headers["authorization"],
+                "Bearer router-key-not-provider-key"
+            );
+            for name in [
+                "origin",
+                "sec-fetch-site",
+                "sec-fetch-mode",
+                "sec-fetch-dest",
+                "sec-fetch-user",
+            ] {
+                assert!(!sent.headers.contains_key(name));
+            }
+        }
+        if key.is_some() {
+            let calls_before = upstream.calls.lock().unwrap().len();
+            let response = client
+                .post(&url)
+                .header("authorization", "Bearer wrong-key")
+                .header("sec-fetch-site", "none")
+                .header("sec-fetch-mode", "no-cors")
+                .header("sec-fetch-dest", "empty")
+                .body("{}")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 401);
+            assert_eq!(upstream.calls.lock().unwrap().len(), calls_before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn electron_exception_does_not_allow_web_origins_navigation_or_ambiguous_metadata() {
+    let upstream = upstream("teeproxy-unit-test", "json").await;
+    let gateway = proxy(config(&upstream), true, None).await;
+    let client = agent();
+    let url = format!("{}/v1/chat/completions", gateway.url);
+    let native: hyper::HeaderMap = hyper::HeaderMap::from_iter([
+        (
+            hyper::header::HeaderName::from_static("sec-fetch-site"),
+            "none".parse().unwrap(),
+        ),
+        (
+            hyper::header::HeaderName::from_static("sec-fetch-mode"),
+            "no-cors".parse().unwrap(),
+        ),
+        (
+            hyper::header::HeaderName::from_static("sec-fetch-dest"),
+            "empty".parse().unwrap(),
+        ),
+    ]);
+    let mut rejected = Vec::new();
+    for (name, values) in [
+        (
+            "origin",
+            &[
+                "https://example.com",
+                "null",
+                "",
+                "vscode-file://vscode-app",
+            ][..],
+        ),
+        (
+            "sec-fetch-site",
+            &[
+                "cross-site",
+                "same-site",
+                "same-origin",
+                "none, cross-site",
+                "null",
+                "",
+            ][..],
+        ),
+        (
+            "sec-fetch-mode",
+            &[
+                "navigate",
+                "nested-navigate",
+                "websocket",
+                "no-cors, navigate",
+            ][..],
+        ),
+        (
+            "sec-fetch-dest",
+            &["document", "iframe", "image", "empty, document"][..],
+        ),
+    ] {
+        for value in values {
+            let mut headers = native.clone();
+            headers.insert(name, value.parse().unwrap());
+            rejected.push(headers);
+        }
+    }
+    for name in ["sec-fetch-mode", "sec-fetch-dest"] {
+        let mut headers = native.clone();
+        headers.remove(name);
+        rejected.push(headers);
+    }
+    for name in ["sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"] {
+        let mut headers = native.clone();
+        headers.append(name, native[name].clone());
+        rejected.push(headers);
+    }
+    for headers in rejected {
+        let response = client
+            .post(&url)
+            .headers(headers)
+            .body("{}")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 403);
+        assert!(
+            !response
+                .headers()
+                .contains_key("access-control-allow-origin")
+        );
+        assert!(
+            response
+                .text()
+                .await
+                .unwrap()
+                .contains("browser_request_rejected")
+        );
+    }
+    let preflight = client
+        .request(reqwest::Method::OPTIONS, &url)
+        .header("origin", "https://example.com")
+        .header("access-control-request-method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(preflight.status(), 403);
+    assert!(
+        !preflight
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 0);
+    assert!(upstream.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation() {
     use std::io::Write;
     let upstream = upstream("teeproxy-unit-test", "json").await;

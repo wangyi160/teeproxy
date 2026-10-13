@@ -272,9 +272,7 @@ impl Proxy {
             );
             return response;
         }
-        if request.headers().contains_key("origin")
-            || request.headers().contains_key("sec-fetch-site")
-        {
+        if is_browser_request(request.headers()) {
             return failure(403, "browser_request_rejected");
         }
         if request.headers().contains_key("upgrade") {
@@ -437,6 +435,31 @@ fn http_server() -> hyper::server::conn::http1::Builder {
     builder
 }
 
+fn is_browser_request(headers: &HeaderMap) -> bool {
+    if headers.contains_key("origin") {
+        return true;
+    }
+    if !headers.contains_key("sec-fetch-site") {
+        return false;
+    }
+    // Electron's native net.fetch (including VS Code Copilot) sends Fetch
+    // Metadata without a web origin. Only accept its API-request shape; page
+    // requests, navigation, ambiguous duplicates and partial metadata stay denied.
+    ![
+        ("sec-fetch-site", &["none"][..]),
+        ("sec-fetch-mode", &["no-cors", "cors", "same-origin"][..]),
+        ("sec-fetch-dest", &["empty"][..]),
+    ]
+    .iter()
+    .all(|(name, allowed)| {
+        let mut values = headers.get_all(*name).iter();
+        values
+            .next()
+            .is_some_and(|value| allowed.iter().any(|expected| value == *expected))
+            && values.next().is_none()
+    })
+}
+
 fn route_request(request: &Request<Incoming>, address: SocketAddr) -> Result<Uri, u16> {
     let uri = request.uri();
     // Accept origin-form requests to this listener, never forward-proxy targets.
@@ -522,6 +545,11 @@ fn clean_headers(headers: &HeaderMap, request: bool) -> HeaderMap {
             "x-forwarded-host",
             "content-encoding",
             "expect",
+            "origin",
+            "sec-fetch-site",
+            "sec-fetch-mode",
+            "sec-fetch-dest",
+            "sec-fetch-user",
         ] {
             result.remove(name);
         }

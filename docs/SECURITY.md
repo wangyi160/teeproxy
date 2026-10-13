@@ -6,7 +6,7 @@ teeproxy 不生成本地 CA，不拦截供应商 TLS。它只连接配置中固�
 
 默认监听 127.0.0.1:8899；最多 128 个客户端连接、16 个并发请求，每个请求体及 gzip 解压后不超过 2 MiB。请求读取超时 30 秒，router 响应头超时 90 秒，流空闲默认 120 秒。请求名额保持到流完成、失败或取消。连接只在响应完整读取后复用，取消或错误使该连接关闭，已发送的请求不会由网关重放。
 
-请求 Host 必须是监听 IP 或 localhost，端口必须匹配实际监听端口；URI 只接受 origin-form 的允许 API 路径。CONNECT、绝对目标 URL、浏览器 Origin/Sec-Fetch-Site 请求和管理 API 都会被拒绝。teeproxy 不按传入 Host 选择上游，不允许客户端改变上游目标。
+请求 Host 必须是监听 IP 或 localhost，端口必须匹配实际监听端口；URI 只接受 origin-form 的允许 API 路径。CONNECT、绝对目标 URL、浏览器请求和管理 API 都会被拒绝。带 Origin（含 `null`）的请求始终拒绝；VS Code Copilot 等 Electron 原生客户端可携带无 Origin 的 `Sec-Fetch-Site: none`、`Sec-Fetch-Dest: empty` 和 API fetch 模式（`no-cors` / `cors` / `same-origin`）。这三个头须齐全且各只有一个值，网页来源、导航请求及歧义头仍拒绝，不开放浏览器 CORS。这些本机 Fetch Metadata 头不会转发上游。本地 key 校验和 Host 限制照常执行。teeproxy 不按传入 Host 选择上游，不允许客户端改变上游目标。
 
 可选 client_key_env 用于限制本机访问。teeproxy 清理 agent 认证、Cookie 和逐跳头，再设置固定 router key。额外自定义头仍可能转发，请勿在其中放其他服务密钥。程序不会记录请求体、回答或认证值，响应强制 Cache-Control: no-store。
 
