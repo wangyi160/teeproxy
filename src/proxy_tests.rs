@@ -38,7 +38,6 @@ struct Upstream {
     running: Running,
     calls: Arc<Mutex<Vec<Captured>>>,
     attestations: Arc<AtomicUsize>,
-    quote_version: Arc<AtomicUsize>,
 }
 
 async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> Upstream {
@@ -63,8 +62,6 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
     let captured = calls.clone();
     let attestations = Arc::new(AtomicUsize::new(0));
     let attests = attestations.clone();
-    let quote_version = Arc::new(AtomicUsize::new(7));
-    let quotes = quote_version.clone();
     let task = tokio::spawn(async move {
         let mut tasks = tokio::task::JoinSet::new();
         loop {
@@ -72,11 +69,11 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                 socket = listener.accept() => {
                     let (socket, _) = socket.unwrap();
                     let acceptor = acceptor.clone(); let certificate = certificate.clone();
-                    let captured = captured.clone(); let attests = attests.clone(); let quotes = quotes.clone();
+                    let captured = captured.clone(); let attests = attests.clone();
                     tasks.spawn(async move {
                         let Ok(tls) = acceptor.accept(socket).await else { return; };
                         let service = service_fn(move |request: Request<hyper::body::Incoming>| {
-                            let certificate = certificate.clone(); let captured = captured.clone(); let attests = attests.clone(); let quotes = quotes.clone();
+                            let certificate = certificate.clone(); let captured = captured.clone(); let attests = attests.clone();
                             async move {
                                 let (parts, body) = request.into_parts();
                                 let bytes = to_bytes(Body::new(body), MAX_BODY + 1024).await.unwrap();
@@ -91,23 +88,16 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                     if response_mode == "bad-binding" { value["nonce"] = json!("00".repeat(32)); }
                                     return Ok::<_, Infallible>(Response::new(Body::from(value.to_string())));
                                 }
+                                let rule = parts.headers.get("x-router-routing").map(|v|serde_json::from_slice::<serde_json::Value>(v.as_bytes()).unwrap());
                                 captured.lock().unwrap().push(Captured { path: parts.uri.to_string(), headers: parts.headers, body: bytes });
-                                if !["catalog", "catalog-denied", "inventory-unavailable"].contains(&response_mode) {
-                                    let (mut models, mut pools) = crate::routing::tests::fixture();
-                                    if quotes.load(Ordering::SeqCst) == 8 {
-                                        pools["data"][1]["multiplier_millionths"] = json!(900000);
-                                        pools["data"][1]["price_version"] = json!(8);
-                                        models["data"][1]["router_pricing"]["version"] = json!(8);
-                                        models["data"][1]["router_pricing"]["rates"][0]["multiplier_millionths"] = json!(900000);
-                                    }
-                                    if parts.uri.path() == "/v1/models" { let mut r = Response::new(Body::from(models.to_string())); *r.status_mut() = hyper::StatusCode::CREATED; return Ok(r); }
-                                    if parts.uri.path() == "/v1/pools" { return Ok(Response::new(Body::from(pools.to_string()))); }
-                                    if response_mode == "automatic-price-changed" || response_mode == "price-race" {
-                                        if response_mode == "price-race" { quotes.store(8, Ordering::SeqCst); }
-                                        let mut response = Response::new(Body::from("{\"error\":{\"code\":\"price_changed\"}}"));
-                                        *response.status_mut() = hyper::StatusCode::CONFLICT;
-                                        return Ok(response);
-                                    }
+                                if parts.uri.path() == "/health/live" {
+                                    let health = if response_mode == "old-router" { json!({"status":"ok"}) } else { json!({"status":"ok","routing_protocol_versions":[1]}) };
+                                    return Ok(Response::new(Body::from(health.to_string())));
+                                }
+                                if response_mode == "rule-denied" {
+                                    let mut response = Response::new(Body::from(r#"{"error":{"code":"routing_multiplier_exceeded"}}"#));
+                                    *response.status_mut() = hyper::StatusCode::FORBIDDEN;
+                                    return Ok(response);
                                 }
                                 if response_mode == "catalog" || response_mode == "catalog-denied" {
                                     if response_mode == "catalog-denied" && parts.uri.path() == "/v1/pools" {
@@ -136,6 +126,13 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                 } else { Body::from("{\"ok\":true}") };
                                 let mut response = Response::new(body);
                                 *response.status_mut() = hyper::StatusCode::CREATED;
+                                if let Some(rule) = rule {
+                                    let pool = if rule["mode"] == "auto" { "m_router.selected" } else { rule["pool"].as_str().unwrap() };
+                                    response.headers_mut().insert("x-router-pool",pool.parse().unwrap());
+                                    response.headers_mut().insert("x-router-multiplier-millionths", "200000".parse().unwrap());
+                                    response.headers_mut().insert("x-router-price-version", "9".parse().unwrap());
+                                    if response_mode != "unconfirmed-rule" { response.headers_mut().insert("x-router-routing-version", "1".parse().unwrap()); }
+                                }
                                 response.headers_mut().insert("content-type", "text/event-stream".parse().unwrap());
                                 response.headers_mut().insert("x-request-id", "fixture-request".parse().unwrap());
                                 response.headers_mut().insert("connection", "x-hop-only".parse().unwrap());
@@ -154,7 +151,6 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
         running: Running { url, task },
         calls,
         attestations,
-        quote_version,
     }
 }
 
@@ -193,61 +189,74 @@ fn agent() -> reqwest::Client {
 }
 
 #[tokio::test]
-async fn fixed_pool_reads_latest_multiplier_before_each_request_and_cannot_escape_cap() {
-    let upstream = upstream("teeproxy-unit-test", "automatic").await;
-    let mut config = config(&upstream);
-    config.pool = Some("m_b.pool".into());
-    config.routing.max_multiplier_millionths = 500000;
-    let gateway = proxy(config, true, None).await;
-    let body = r#"{ "model":"model-a", "input":"exact bytes" }"#;
-    let response = agent()
-        .post(format!("{}/v1/responses", gateway.url))
-        .header("x-router-pool", "m_a.pool")
-        .header("x-router-account", "bypass")
-        .header("x-router-price-version", "1")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 201);
-    assert_eq!(response.headers()["x-teeproxy-pool"], "m_b.pool");
-    assert_eq!(response.headers()["x-teeproxy-multiplier"], "0.5");
-    response.bytes().await.unwrap();
-    // The merchant changes its multiplier while the same local proxy is running.
-    upstream.quote_version.store(8, Ordering::SeqCst);
-    let response = agent()
-        .post(format!("{}/v1/responses", gateway.url))
-        .header("x-router-pool", "m_a.pool")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 403);
-    assert!(
-        response
-            .text()
+async fn rules_are_sent_without_local_catalog_selection_and_router_result_is_displayed() {
+    for automatic in [false, true] {
+        let upstream = upstream("teeproxy-unit-test", "json").await;
+        let mut config = config(&upstream);
+        config.routing.automatic = automatic;
+        config.pool = Some("m_b.pool".into());
+        config.routing.max_multiplier_millionths = 500000;
+        config.routing.priority = crate::routing::Priority::Speed;
+        let gateway = proxy(config, true, None).await;
+        let raw = r#"{ "model":"agent-model", "input":"hello", "stream":true }"#;
+        let response = agent()
+            .post(format!("{}/v1/responses", gateway.url))
+            .header("x-router-pool", "override")
+            .header("x-router-routing", r#"{"version":99}"#)
+            .header("x-router-price-version", "99")
+            .header("x-router-account", "override")
+            .header("x-router-official-price-revision", "99")
+            .body(raw)
+            .send()
             .await
-            .unwrap()
-            .contains("routing_multiplier_exceeded")
-    );
-    let calls = upstream.calls.lock().unwrap();
-    assert_eq!(calls.len(), 5); // Two fresh inventories; only the first generation was sent.
-    let generated: Vec<_> = calls.iter().filter(|c| c.path == "/v1/responses").collect();
-    assert_eq!(generated.len(), 1);
-    assert_eq!(generated[0].body, body);
-    assert_eq!(generated[0].headers["x-router-pool"], "m_b.pool");
-    assert_eq!(generated[0].headers["x-router-price-version"], "7");
-    assert!(!generated[0].headers.contains_key("x-router-account"));
+            .unwrap();
+        assert_eq!(response.status(), 201);
+        assert_eq!(
+            response.headers()["x-teeproxy-pool"],
+            if automatic {
+                "m_router.selected"
+            } else {
+                "m_b.pool"
+            }
+        );
+        assert_eq!(response.headers()["x-teeproxy-multiplier"], "0.2");
+        response.bytes().await.unwrap();
+        let calls = upstream.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].path, "/health/live");
+        assert!(calls[0].body.is_empty());
+        assert!(!calls[0].headers.contains_key("authorization"));
+        let sent = &calls[1];
+        assert_eq!(sent.body, raw);
+        let rule: serde_json::Value =
+            serde_json::from_slice(sent.headers["x-router-routing"].as_bytes()).unwrap();
+        assert_eq!(rule["version"], 1);
+        assert_eq!(rule["max_multiplier_millionths"], 500000);
+        assert_eq!(rule["priority"], "speed");
+        assert_eq!(rule["mode"], if automatic { "auto" } else { "fixed" });
+        assert_eq!(
+            rule.get("pool").and_then(serde_json::Value::as_str),
+            if automatic { None } else { Some("m_b.pool") }
+        );
+        for name in [
+            "x-router-pool",
+            "x-router-account",
+            "x-router-price-version",
+            "x-router-official-price-revision",
+        ] {
+            assert!(!sent.headers.contains_key(name));
+        }
+    }
 }
-
 #[tokio::test]
-async fn fixed_pool_price_race_is_version_bound_never_replayed_and_next_request_is_blocked() {
-    let upstream = upstream("teeproxy-unit-test", "price-race").await;
-    let mut config = config(&upstream);
-    config.pool = Some("m_b.pool".into());
-    config.routing.max_multiplier_millionths = 500000;
-    let gateway = proxy(config, true, None).await;
-    for status in [409, 403] {
+async fn router_rejections_are_forwarded_once_and_old_routers_receive_no_generation() {
+    for (mode, status, code, count) in [
+        ("rule-denied", 403, "routing_multiplier_exceeded", 2),
+        ("old-router", 502, "router_routing_protocol_required", 1),
+        ("unconfirmed-rule", 502, "router_routing_result_invalid", 2),
+    ] {
+        let upstream = upstream("teeproxy-unit-test", mode).await;
+        let gateway = proxy(config(&upstream), true, None).await;
         let response = agent()
             .post(format!("{}/v1/responses", gateway.url))
             .json(&json!({"model":"model-a"}))
@@ -255,177 +264,32 @@ async fn fixed_pool_price_race_is_version_bound_never_replayed_and_next_request_
             .await
             .unwrap();
         assert_eq!(response.status(), status);
-        response.bytes().await.unwrap();
-    }
-    let calls = upstream.calls.lock().unwrap();
-    let generated: Vec<_> = calls.iter().filter(|c| c.path == "/v1/responses").collect();
-    assert_eq!(generated.len(), 1);
-    assert_eq!(generated[0].headers["x-router-price-version"], "7");
-}
-
-#[tokio::test]
-async fn fixed_pool_missing_quote_model_protocol_or_selection_never_forwards_generation() {
-    for (mode, pool, path, body, status, error) in [
-        (
-            "inventory-unavailable",
-            Some("m_b.pool"),
-            "/v1/responses",
-            json!({"model":"model-a"}),
-            503,
-            "routing_inventory_unavailable",
-        ),
-        (
-            "automatic",
-            Some("m_b.pool"),
-            "/v1/responses",
-            json!({"model":"unknown"}),
-            503,
-            "routing_no_matching_pool",
-        ),
-        (
-            "automatic",
-            Some("m_b.pool"),
-            "/v1/messages",
-            json!({"model":"model-a"}),
-            503,
-            "routing_no_matching_pool",
-        ),
-        (
-            "automatic",
-            Some("m_b.pool"),
-            "/v1/responses",
-            json!({"model":"m_a/model-a"}),
-            503,
-            "routing_no_matching_pool",
-        ),
-        (
-            "automatic",
-            None,
-            "/v1/responses",
-            json!({"model":"model-a"}),
-            400,
-            "routing_pool_required",
-        ),
-    ] {
-        let upstream = upstream("teeproxy-unit-test", mode).await;
-        let mut config = config(&upstream);
-        config.pool = pool.map(String::from);
-        let gateway = proxy(config, true, None).await;
-        let response = agent()
-            .post(format!("{}{path}", gateway.url))
-            .header("x-router-pool", "m_a.pool")
-            .json(&body)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), status);
-        assert!(response.text().await.unwrap().contains(error));
-        assert!(
-            upstream
-                .calls
-                .lock()
-                .unwrap()
-                .iter()
-                .all(|c| c.body.is_empty())
-        );
+        assert!(response.text().await.unwrap().contains(code));
+        assert_eq!(upstream.calls.lock().unwrap().len(), count);
     }
 }
-
 #[tokio::test]
-async fn automatic_routing_uses_attested_quotes_and_overrides_caller_pool_without_rewriting_body() {
-    let upstream = upstream("teeproxy-unit-test", "automatic").await;
+async fn fixed_mode_requires_a_configured_pool_not_a_caller_header() {
+    let upstream = upstream("teeproxy-unit-test", "json").await;
     let mut config = config(&upstream);
-    config.pool = Some("m_c.pool".into());
-    config.routing.automatic = true;
-    let proxy = proxy(config, true, None).await;
-    let body = "{\n  \"model\":\"model-a\", \"input\":\"hello\"\n}";
-    let response = agent()
-        .post(format!("{}/v1/responses", proxy.url))
-        .header("x-router-pool", "m_c.pool")
-        .header("x-router-price-version", "1")
-        .header("x-router-account", "do-not-pin-an-account")
-        .header("content-type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), 201);
-    assert_eq!(response.headers()["x-teeproxy-pool"], "m_a.pool");
-    assert_eq!(response.headers()["x-teeproxy-multiplier"], "0.2");
-    response.bytes().await.unwrap();
-    let calls = upstream.calls.lock().unwrap();
-    assert_eq!(calls.len(), 3);
-    assert_eq!(calls[0].path, "/v1/models");
-    assert_eq!(calls[1].path, "/v1/pools");
-    assert_eq!(calls[2].headers["x-router-pool"], "m_a.pool");
-    assert_eq!(calls[2].headers["x-router-price-version"], "7");
-    assert!(!calls[2].headers.contains_key("x-router-account"));
-    assert_eq!(calls[2].body.as_ref(), body.as_bytes());
-    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 1);
-}
-
-#[tokio::test]
-async fn automatic_routing_fails_closed_for_budget_and_price_changes_without_replay() {
-    let upstream = upstream("teeproxy-unit-test", "automatic-price-changed").await;
-    let mut config = config(&upstream);
-    config.routing.automatic = true;
-    let gateway = proxy(config.clone(), true, None).await;
-    for _ in 0..2 {
-        let response = agent()
-            .post(format!("{}/v1/responses", gateway.url))
-            .json(&json!({"model":"model-a","input":"test"}))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), 409);
-        response.bytes().await.unwrap();
-    }
-    assert_eq!(
-        upstream
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.path == "/v1/responses")
-            .count(),
-        2
-    );
-    assert_eq!(
-        upstream
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.path == "/v1/models")
-            .count(),
-        2
-    );
-    config.routing.max_multiplier_millionths = 100000;
+    config.pool = None;
     let gateway = proxy(config, true, None).await;
     let response = agent()
         .post(format!("{}/v1/responses", gateway.url))
-        .json(&json!({"model":"model-a","input":"test"}))
+        .header("x-router-pool", "m_a.pool")
+        .body("{}")
         .send()
         .await
         .unwrap();
-    assert_eq!(response.status(), 503);
+    assert_eq!(response.status(), 400);
     assert!(
         response
             .text()
             .await
             .unwrap()
-            .contains("routing_no_matching_pool")
+            .contains("routing_pool_required")
     );
-    assert_eq!(
-        upstream
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|c| c.path == "/v1/responses")
-            .count(),
-        2
-    );
+    assert!(upstream.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -626,7 +490,7 @@ async fn local_api_verifies_once_preserves_bytes_headers_and_reuses_the_attested
     }
     assert_eq!(upstream.attestations.load(Ordering::SeqCst), 1);
     let calls = upstream.calls.lock().unwrap();
-    assert_eq!(calls.len(), 6);
+    assert_eq!(calls.len(), 3);
     for call in calls.iter().filter(|c| c.path.starts_with("/v1/responses")) {
         assert_eq!(call.path, "/v1/responses?beta=true");
         assert_eq!(call.body, raw);
@@ -635,7 +499,13 @@ async fn local_api_verifies_once_preserves_bytes_headers_and_reuses_the_attested
             "Bearer router-key-not-provider-key"
         );
         assert_eq!(call.headers["anthropic-version"], "2023-06-01");
-        assert_eq!(call.headers["x-router-pool"], "m_a.pool");
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(
+                call.headers["x-router-routing"].as_bytes()
+            )
+            .unwrap()["pool"],
+            "m_a.pool"
+        );
         for name in ["cookie", "x-api-key", "proxy-authorization"] {
             assert!(!call.headers.contains_key(name));
         }
@@ -760,13 +630,13 @@ async fn local_api_gzip_preserves_decompressed_bytes() {
     assert_eq!(response.status(), 201);
     response.bytes().await.unwrap();
     let calls = upstream.calls.lock().unwrap();
-    assert_eq!(calls.len(), 3);
-    assert_eq!(calls[2].path, "/v1/responses");
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1].path, "/v1/responses");
     assert_eq!(
-        calls[2].body,
+        calls[1].body,
         "{ \"model\":\"model-a\", \"input\": \"exact bytes\" }"
     );
-    assert!(!calls[2].headers.contains_key("content-encoding"));
+    assert!(!calls[1].headers.contains_key("content-encoding"));
 }
 
 #[tokio::test]

@@ -12,8 +12,8 @@ max_in_flight = 16
 max_connections = 128
 stream_idle_secs = 120
 
-# Both modes read fresh attested quotes and enforce a maximum (default 1x).
+# Both modes send routing rules to the attested router (default maximum 1x).
 # [routing]
 # automatic = false # true selects an authorized pool for the agent's exact model
 # max_multiplier_millionths = 500000 # maximum 0.5x the official base price
-# priority = "price" # price or speed (passive measurements of real streaming calls)
+# priority = "price" # price or speed (router-side measurements of real streaming calls)

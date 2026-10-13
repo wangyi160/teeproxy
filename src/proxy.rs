@@ -68,7 +68,6 @@ struct ForwardBody {
     permit: Option<OwnedSemaphorePermit>,
     idle: Pin<Box<Sleep>>,
     idle_duration: Duration,
-    measurement: Option<crate::routing::Observation>,
 }
 impl Body for ForwardBody {
     type Data = Bytes;
@@ -80,9 +79,6 @@ impl Body for ForwardBody {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(None) => {
-                if let Some(measurement) = &mut this.measurement {
-                    measurement.finish();
-                }
                 if let Some(session) = this.session.take() {
                     this.pool.put(session);
                 }
@@ -90,28 +86,17 @@ impl Body for ForwardBody {
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Ok(frame))) => {
-                if let Some(data) = frame.data_ref()
-                    && let Some(measurement) = &mut this.measurement
-                {
-                    measurement.feed(data);
-                }
                 this.idle
                     .as_mut()
                     .reset(tokio::time::Instant::now() + this.idle_duration);
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(_))) => {
-                if let Some(measurement) = &mut this.measurement {
-                    measurement.fail();
-                }
                 this.session.take();
                 this.permit.take();
                 Poll::Ready(Some(Err(io::Error::other("Router stream interrupted"))))
             }
             Poll::Pending if this.idle.as_mut().poll(cx).is_ready() => {
-                if let Some(measurement) = &mut this.measurement {
-                    measurement.fail();
-                }
                 this.session.take();
                 this.permit.take();
                 Poll::Ready(Some(Err(io::Error::new(
@@ -302,23 +287,17 @@ impl Proxy {
             Ok(data) => data,
             Err(code) => return failure(code, "invalid_content_encoding_or_body_limit"),
         };
-        let route_model = if parts.method == Method::POST {
-            let Some(protocol) = crate::routing::protocol(uri.path()) else {
+        let rule = if parts.method == Method::POST {
+            if !matches!(
+                uri.path(),
+                "/v1/chat/completions" | "/v1/responses" | "/v1/messages"
+            ) {
                 return failure(400, "routing_unsupported_protocol");
-            };
-            if !self.config.routing.automatic && self.config.pool.is_none() {
-                return failure(400, "routing_pool_required");
             }
-            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
-                return failure(400, "routing_invalid_request");
-            };
-            let Some(model) = value["model"]
-                .as_str()
-                .filter(|m| !m.is_empty() && m.len() <= 640 && !m.chars().any(char::is_control))
-            else {
-                return failure(400, "routing_model_required");
-            };
-            Some((model.to_owned(), protocol))
+            match self.config.routing.header(self.config.pool.as_deref()) {
+                Ok(rule) => Some(rule),
+                Err(_) => return failure(400, "routing_pool_required"),
+            }
         } else {
             None
         };
@@ -328,52 +307,12 @@ impl Proxy {
             Ok(session) => session,
             Err(_) => return failure(502, "router_attestation_failed"),
         };
-        let mut measurement = if let Some((model, protocol)) = route_model {
-            let rows = match self
-                .routing
-                .inventory(&mut session, &self.router_auth)
-                .await
-            {
-                Ok(rows) => rows,
-                Err(_) => {
-                    self.routing
-                        .notify("路由检查失败：无法读取可信报价，未转发请求".into());
-                    return failure(503, "routing_inventory_unavailable");
-                }
-            };
-            match self.routing.choose(
-                &rows,
-                &self.config.routing,
-                &model,
-                protocol,
-                if self.config.routing.automatic {
-                    None
-                } else {
-                    self.config.pool.as_deref()
-                },
-            ) {
-                Ok(observation) => Some(observation),
-                Err(code) => {
-                    self.routing
-                        .notify(if code == "routing_multiplier_exceeded" {
-                            "指定账号池的当前倍率超过上限，未转发请求".into()
-                        } else {
-                            format!("路由检查失败：{code}，未转发请求")
-                        });
-                    self.pool.put(session);
-                    return failure(
-                        if code == "routing_multiplier_exceeded" {
-                            403
-                        } else {
-                            503
-                        },
-                        code,
-                    );
-                }
-            }
-        } else {
-            None
-        };
+        let generation = rule.is_some();
+        if generation && session.require_routing_v1().await.is_err() {
+            self.routing
+                .notify("Router 不支持路由规则 v1，未发送生成请求".into());
+            return failure(502, "router_routing_protocol_required");
+        }
         let mut request = Request::new(Full::new(data));
         *request.method_mut() = parts.method;
         *request.uri_mut() = uri;
@@ -381,51 +320,67 @@ impl Proxy {
         request
             .headers_mut()
             .insert("authorization", self.router_auth.clone());
-        if let Some(measurement) = &measurement {
-            request.headers_mut().remove("x-router-account");
-            request.headers_mut().insert(
-                "x-router-pool",
-                measurement.candidate.pool.parse().expect("validated pool"),
-            );
-            request.headers_mut().insert(
-                "x-router-price-version",
-                measurement.candidate.version.into(),
-            );
-        } else if !self.config.routing.automatic
-            && let Some(pool) = &self.config.pool
-        {
-            request
-                .headers_mut()
-                .insert("x-router-pool", pool.parse().expect("validated pool"));
+        for name in [
+            "x-router-routing",
+            "x-router-pool",
+            "x-router-account",
+            "x-router-price-version",
+            "x-router-official-price-revision",
+        ] {
+            request.headers_mut().remove(name);
+        }
+        if let Some(rule) = rule {
+            request.headers_mut().insert("x-router-routing", rule);
         }
         let response = match session.send_request(request).await {
             Ok(response) => response,
             // Never retry a request once its send has started.
             Err(_) => {
-                if let Some(measurement) = &mut measurement {
-                    measurement.fail();
-                }
                 return failure(502, "router_connection_failed_request_not_replayed");
             }
         };
         let (parts, body) = response.into_parts();
-        if let Some(measurement) = &mut measurement {
-            measurement.response(
-                parts.status.as_u16(),
-                parts
-                    .headers
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| {
-                        v.split(';')
-                            .next()
-                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
-                    }),
-            );
-        }
-        let selected = measurement
-            .as_ref()
-            .map(|m| (m.candidate.pool.clone(), m.candidate.multiplier));
+        let selected = if generation && parts.status.is_success() {
+            let pool = parts
+                .headers
+                .get("x-router-pool")
+                .and_then(|v| v.to_str().ok());
+            let rate = parts
+                .headers
+                .get("x-router-multiplier-millionths")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok());
+            match (pool, rate) {
+                (Some(pool), Some(rate))
+                    if parts
+                        .headers
+                        .get("x-router-routing-version")
+                        .is_some_and(|v| v == "1")
+                        && !pool.is_empty()
+                        && pool.len() <= 128
+                        && pool
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
+                        && rate <= self.config.routing.max_multiplier_millionths
+                        && (self.config.routing.automatic
+                            || self.config.pool.as_deref() == Some(pool)) =>
+                {
+                    self.routing.notify(format!(
+                        "Router 已选择 {} · {}×",
+                        pool,
+                        crate::routing::format_multiplier(rate)
+                    ));
+                    Some((pool.to_owned(), rate))
+                }
+                _ => return failure(502, "router_routing_result_invalid"),
+            }
+        } else {
+            if generation {
+                self.routing
+                    .notify(format!("Router 拒绝请求：HTTP {}", parts.status.as_u16()));
+            }
+            None
+        };
         let duration = Duration::from_secs(self.config.stream_idle_secs);
         let body = ForwardBody {
             inner: body,
@@ -434,7 +389,6 @@ impl Proxy {
             permit: Some(permit),
             idle: Box::pin(tokio::time::sleep(duration)),
             idle_duration: duration,
-            measurement,
         };
         let mut response = Response::new(body.boxed_unsync());
         *response.status_mut() = parts.status;

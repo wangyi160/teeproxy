@@ -83,6 +83,7 @@ pub struct VerifiedSession {
     pub id: String,
     transport: Transport,
     verified_at: Instant,
+    routing_v1: bool,
 }
 
 /// Only transport failures may request a fresh attestation. A POST whose send
@@ -102,6 +103,40 @@ impl std::fmt::Display for ConnectionFailure {
 impl std::error::Error for ConnectionFailure {}
 
 impl VerifiedSession {
+    /// Capability negotiation is cached only for this exact attested TLS session.
+    pub(crate) async fn require_routing_v1(&mut self) -> Result<()> {
+        if self.routing_v1 {
+            return Ok(());
+        }
+        let response = self
+            .send_request(
+                Request::builder()
+                    .uri("/health/live")
+                    .body(Full::new(Bytes::new()))?,
+            )
+            .await?;
+        ensure!(
+            response.status().is_success(),
+            "Router capability query failed"
+        );
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(30),
+            http_body_util::Limited::new(response.into_body(), 8192).collect(),
+        )
+        .await?
+        .map_err(|_| anyhow::anyhow!("Invalid router capability response"))?
+        .to_bytes();
+        let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+        ensure!(
+            value["routing_protocol_versions"]
+                .as_array()
+                .is_some_and(|vs| vs.iter().any(|v| v.as_u64() == Some(1))),
+            "Router routing v1 required"
+        );
+        self.routing_v1 = true;
+        Ok(())
+    }
+
     pub fn is_current(&self) -> bool {
         self.verified_at.elapsed() < Duration::from_secs(SESSION_SECONDS)
             && !self.transport.driver.is_finished()
@@ -428,6 +463,7 @@ pub async fn verify(endpoint: &str, trust: &Trust) -> VerificationAttempt {
             id: random_hex()?,
             transport,
             verified_at: Instant::now(),
+            routing_v1: false,
         })
     }
     .await;
@@ -483,6 +519,7 @@ mod reconnect_tests {
             VerifiedSession {
                 id: "test-session".into(),
                 verified_at: Instant::now(),
+                routing_v1: false,
                 transport: Transport {
                     sender,
                     driver,
