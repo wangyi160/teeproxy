@@ -519,6 +519,12 @@ impl App {
                 && (self.task.is_none() || self.running)) as i32,
         );
         EnableWindow(self.by_id[&USE_POOL], (!value) as i32);
+        EnableWindow(
+            self.by_id[&COPY_MODEL],
+            (self.inventory_task.is_none()
+                && !self.stopping
+                && (self.task.is_none() || self.running)) as i32,
+        );
         for id in FIELDS {
             EnableWindow(self.by_id[&id], (!value) as i32);
         }
@@ -612,7 +618,9 @@ impl App {
                     }
                 }));
             }
-            REFRESH | COPY_MODEL | USE_POOL => self.inventory_action(id)?,
+            REFRESH | COPY_MODEL | USE_POOL | MODEL_POOL | VIEW_POOL_MODELS => {
+                self.inventory_action(id)?
+            }
             tray::OPEN => tray::restore(self.hwnd),
             tray::TOGGLE => {
                 if self.task.is_some() || self.inventory_task.is_some() {
@@ -687,15 +695,13 @@ impl App {
                     self.inventory_task.take();
                     match result {
                         Ok(catalog) => {
-                            self.catalog = catalog;
-                            self.catalog_loaded = true;
-                            self.render_catalog();
+                            self.replace_catalog(catalog);
                             self.set(
                                 CATALOG_STATUS,
                                 &format!(
-                                    "{} 个模型 · {} 个账号池",
+                                    "{} 个池内模型 · {} 个账号池",
                                     self.catalog.models.len(),
-                                    self.catalog.pools
+                                    self.catalog.pools.len()
                                 ),
                             );
                             self.append("已通过 TEE 验证并刷新模型、账号池及账号状态。");
@@ -862,6 +868,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
+                if id == MODEL_POOL && notification == CBN_SELCHANGE as u16 {
+                    app.set(SEARCH, "");
+                    app.render_catalog();
+                    return 0;
+                }
                 if notification == EN_SETFOCUS as u16 || notification == EN_KILLFOCUS as u16 {
                     InvalidateRect(hwnd, ptr::null(), 0);
                 }

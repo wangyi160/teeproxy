@@ -22,7 +22,7 @@ const PAGES: [(&str, &str); 5] = [
     ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
     (
         "模型列表",
-        "查看当前业务密钥可访问的模型，复制模型 ID 即可使用。",
+        "先选择账号池，再使用该池的模型；切换运行中的池需先停止代理。",
     ),
     ("账号池", "查看上游账号及可用状态，选择代理使用的账号池。"),
     ("连接设置", "配置上游 Router 与本地代理服务。"),
@@ -125,7 +125,7 @@ impl App {
             2,
         )?;
         self.button(OPEN_SETTINGS, "连接设置", [-192, 336, 132, 38], 0)?;
-        self.label("可访问模型", [268, 518, 220, 24], 2)?;
+        self.label("池内模型总数", [268, 518, 220, 24], 2)?;
         self.add(
             MODEL_COUNT,
             w!("STATIC"),
@@ -259,7 +259,7 @@ impl App {
         self.set(
             POOL_COUNT,
             &if self.catalog_loaded {
-                self.catalog.pools.to_string()
+                self.catalog.pools.len().to_string()
             } else {
                 "未读取".into()
             },
@@ -339,7 +339,8 @@ impl App {
                 [244, 496, -280, 116],
             ],
             SETTINGS_PAGE => vec![[244, 120, -280, 316], [244, 448, -280, 204]],
-            MODEL_PAGE | ACCOUNT_PAGE => vec![[244, 186, -280, -274]],
+            MODEL_PAGE => vec![[244, 230, -280, -318]],
+            ACCOUNT_PAGE => vec![[244, 186, -280, -274]],
             LOG_PAGE => vec![[244, 128, -280, -184]],
             _ => Vec::new(),
         };

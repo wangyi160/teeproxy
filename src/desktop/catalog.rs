@@ -9,12 +9,22 @@ use std::{collections::BTreeSet, time::Duration};
 pub(crate) struct Catalog {
     pub models: Vec<Model>,
     pub accounts: Vec<Account>,
-    pub pools: usize,
+    pub pools: Vec<Pool>,
+}
+pub(crate) struct Pool {
+    pub id: String,
+    pub name: String,
+    pub merchant: String,
+    pub merchant_id: String,
+    pub provider: String,
+    pub multiplier: String,
+    pub state: String,
+    pub label: String,
 }
 pub(crate) struct Model {
     pub id: String,
     pub provider: String,
-    pub pools: String,
+    pub pool: String,
     pub protocols: String,
 }
 pub(crate) struct Account {
@@ -115,32 +125,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
         models.len() <= 10000 && pools.len() <= 10000,
         "目录记录过多"
     );
-    let mut result = Catalog {
-        pools: pools.len(),
-        ..Default::default()
-    };
-    for model in models {
-        let id = text(&model["id"]);
-        ensure!(!id.is_empty(), "模型目录缺少模型 ID");
-        let caps = model["router_capabilities"].as_array();
-        result.models.push(Model {
-            id,
-            provider: joined(caps.into_iter().flatten().map(|v| provider(&v["provider"]))),
-            pools: joined(
-                model["router_pools"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(text),
-            ),
-            protocols: joined(
-                caps.into_iter()
-                    .flatten()
-                    .flat_map(|v| v["protocols"].as_array().into_iter().flatten())
-                    .map(text),
-            ),
-        });
-    }
+    let mut result = Catalog::default();
     for pool in pools {
         let name = text(&pool["id"]);
         let pool_name = match text(&pool["pool_name"]) {
@@ -157,6 +142,41 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             result.accounts.len() + accounts.len().max(1) <= 10000,
             "账号记录过多"
         );
+        ensure!(!result.pools.iter().any(|p| p.id == name), "账号池 ID 重复");
+        let state = if accounts.is_empty() {
+            "无账号"
+        } else if accounts
+            .iter()
+            .any(|a| a["enabled"] != false && a["available"] == true)
+        {
+            "可用"
+        } else if accounts.iter().all(|a| a["enabled"] == false) {
+            "已停用"
+        } else if accounts.iter().any(|a| a["catalog"]["state"] == "error") {
+            "目录获取失败"
+        } else if accounts
+            .iter()
+            .any(|a| a["catalog"]["state"] == "refreshing")
+        {
+            "目录刷新中"
+        } else {
+            "暂不可用"
+        };
+        let label = [pool_name.as_str(), merchant.as_str(), rate.as_str()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        result.pools.push(Pool {
+            id: name.clone(),
+            name: pool_name.clone(),
+            merchant: merchant.clone(),
+            merchant_id: text(&pool["merchant_id"]),
+            provider: provider(&pool["provider"]),
+            multiplier: rate.clone(),
+            state: state.into(),
+            label,
+        });
         if accounts.is_empty() {
             result.accounts.push(Account {
                 pool: name.clone(),
@@ -207,7 +227,82 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             });
         }
     }
-    result.models.sort_by(|a, b| a.id.cmp(&b.id));
+    // A row is a (pool, model) pair. Never merge prices or capabilities across pools.
+    let mut seen = BTreeSet::new();
+    for model in models {
+        let wire_id = text(&model["id"]);
+        ensure!(!wire_id.is_empty(), "模型目录缺少模型 ID");
+        let memberships: BTreeSet<_> = model["router_pools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        for membership in &memberships {
+            // The pool endpoint is authoritative for the pools this key may see.
+            let Some(pool) = result.pools.iter().find(|p| p.id == *membership) else {
+                continue;
+            };
+            let merchant = model["router_merchant"]["id"].as_str().unwrap_or("");
+            ensure!(
+                pool.merchant_id.is_empty() || merchant == pool.merchant_id,
+                "模型与账号池的商户不匹配，请刷新列表"
+            );
+            let id = if merchant.is_empty() {
+                wire_id.clone()
+            } else {
+                wire_id
+                    .strip_prefix(&format!("{merchant}/"))
+                    .filter(|s| !s.is_empty())
+                    .context("模型 ID 与商户不匹配")?
+                    .to_owned()
+            };
+            if !seen.insert((pool.id.clone(), id.clone())) {
+                continue;
+            }
+            ensure!(result.models.len() < 10000, "账号池模型记录过多");
+            let caps: Vec<_> = model["router_capabilities"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|c| {
+                    c["pool"].as_str() == Some(membership)
+                        || (memberships.len() == 1 && c["pool"].is_null())
+                })
+                .collect();
+            let source = if pool.provider.is_empty() {
+                joined(caps.iter().map(|c| provider(&c["provider"])))
+            } else {
+                pool.provider.clone()
+            };
+            let protocols = joined(
+                caps.iter()
+                    .flat_map(|c| c["protocols"].as_array().into_iter().flatten())
+                    .map(text),
+            );
+            result.models.push(Model {
+                id,
+                pool: pool.id.clone(),
+                provider: source,
+                protocols,
+            });
+        }
+    }
+    result
+        .pools
+        .sort_by(|a, b| (&a.name, &a.merchant, &a.id).cmp(&(&b.name, &b.merchant, &b.id)));
+    let mut labels = std::collections::BTreeMap::<String, usize>::new();
+    for pool in &result.pools {
+        *labels.entry(pool.label.clone()).or_default() += 1;
+    }
+    for pool in &mut result.pools {
+        if labels[&pool.label] > 1 {
+            pool.label = format!("{} · {}", pool.label, pool.id);
+        }
+    }
+    result
+        .models
+        .sort_by(|a, b| (&a.pool, &a.id).cmp(&(&b.pool, &b.id)));
     result
         .accounts
         .sort_by(|a, b| (&a.pool, &a.id).cmp(&(&b.pool, &b.id)));
@@ -217,6 +312,39 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn models_are_scoped_to_authorized_pools_with_distinct_merchants_and_capabilities() {
+        let pools = json!({"data":[
+            {"id":"m_a.cheap","pool_name":"cheap","merchant_id":"m_a","merchant_name":"Shop","provider":"openai","multiplier_millionths":200000,"accounts":[]},
+            {"id":"m_a.premium","pool_name":"premium","merchant_id":"m_a","merchant_name":"Shop","provider":"openai","multiplier_millionths":1000000,"accounts":[]},
+            {"id":"m_b.cheap","pool_name":"cheap","merchant_id":"m_b","merchant_name":"Shop","provider":"openai","multiplier_millionths":200000,"accounts":[]}
+        ]});
+        let models = json!({"data":[
+            {"id":"m_a/vendor/model","router_merchant":{"id":"m_a"},"router_pools":["m_a.cheap","m_a.premium","m_a.hidden"],"router_capabilities":[
+                {"pool":"m_a.cheap","protocols":["responses"]},
+                {"pool":"m_a.premium","protocols":["chat_completions"]},
+                {"pool":"m_a.hidden","protocols":["never-expose"]}]},
+            {"id":"m_b/vendor/model","router_merchant":{"id":"m_b"},"router_pools":["m_b.cheap"]}
+        ]});
+        let catalog = parse(&models, &pools).unwrap();
+        assert_eq!(catalog.models.len(), 3);
+        assert!(catalog.models.iter().all(|m| m.id == "vendor/model"));
+        assert_eq!(catalog.models[0].pool, "m_a.cheap");
+        assert_eq!(catalog.models[0].protocols, "responses");
+        assert_eq!(catalog.models[1].protocols, "chat_completions");
+        assert!(catalog.models[2].protocols.is_empty());
+        assert_eq!(catalog.pools[0].multiplier, "0.2×");
+        assert_ne!(catalog.pools[0].label, catalog.pools[1].label);
+        let mut wrong = models.clone();
+        wrong["data"][0]["router_merchant"]["id"] = json!("m_b");
+        assert!(parse(&wrong, &pools).is_err());
+        let mut duplicate = models.clone();
+        duplicate["data"]
+            .as_array_mut()
+            .unwrap()
+            .push(models["data"][0].clone());
+        assert_eq!(parse(&duplicate, &pools).unwrap().models.len(), 3);
+    }
     #[test]
     fn pool_multiplier_is_exact_and_missing_is_not_assumed_to_be_one() {
         for (value, expected) in [
@@ -248,7 +376,7 @@ mod tests {
         assert_eq!(catalog.accounts[1].state, "暂不可用");
         assert_eq!(catalog.accounts[1].catalog, "获取失败");
         assert_eq!(catalog.accounts[0].state, "无账号");
-        assert_eq!(catalog.pools, 2);
+        assert_eq!(catalog.pools.len(), 2);
         assert!(parse(&json!({"data":[]}), &json!({"error":"bad"})).is_err());
     }
 }

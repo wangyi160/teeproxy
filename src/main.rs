@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use std::path::Path;
 use teeproxy::{client, config::Config, proxy::Proxy};
 
-const HELP: &str = "teeproxy 0.7.0
+const HELP: &str = "teeproxy 0.8.0
 
 teeproxy                         Windows native GUI
 teeproxy gui [--settings PATH]  Windows native GUI with a separate profile
