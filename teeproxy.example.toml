@@ -11,3 +11,11 @@ tdx_policy = "policy/tdx-deny-all.json"
 max_in_flight = 16
 max_connections = 128
 stream_idle_secs = 120
+
+# Optional automatic routing. Uses only the attested, authorized inventory.
+# [routing]
+# automatic = true
+# provider = "openai" # openai, claude, grok, workbuddy; empty = official only
+# model = "" # empty follows the agent; a value restricts, never rewrites, its model
+# max_multiplier_millionths = 500000 # maximum 0.5x the official base price
+# priority = "price" # price or speed (passive measurements of real streaming calls)

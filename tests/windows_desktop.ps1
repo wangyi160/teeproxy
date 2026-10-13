@@ -72,7 +72,7 @@ function Control-Shown([int]$Id) {
 }
 function Open-TestWindow {
     $script:appProcess = Start-Process -FilePath $Binary -ArgumentList @('gui','--settings',('"' + $settingsFile + '"')) -WindowStyle Hidden -PassThru
-    Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,110) -ne [IntPtr]::Zero }
+    Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,609) -ne [IntPtr]::Zero }
 }
 function Close-TestWindow {
     if ($script:appProcess -and -not $script:appProcess.HasExited) {
@@ -82,7 +82,7 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(501,502,503,504,505,302,303,304,307,309,310,311,312,313,314,315)) {
+    foreach ($id in @(501,502,503,504,505,506,302,303,304,307,309,310,311,312,313,314,315,601,602,603,604,605,606,607,608,609)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
     Select-Page 1
@@ -91,10 +91,14 @@ try {
     if (-not (Control-Shown 303) -or -not (Control-Shown 312) -or -not (Control-Shown 314) -or -not (Control-Shown 311) -or (Control-Shown 302) -or (Control-Shown 309)) { throw 'Account tab visibility failed' }
     Select-Page 4
     if (-not (Control-Shown 110) -or (Control-Shown 303)) { throw 'Log tab visibility failed' }
+    Select-Page 5
+    if (-not (Control-Shown 601) -or -not (Control-Shown 602) -or (Control-Shown 303)) { throw 'Routing tab visibility failed' }
+    if ([TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,603))) { throw 'Automatic fields enabled in fixed-pool mode' }
     Select-Page 3
     Set-Control 101 'https://127.0.0.1:1'
     Set-Control 102 'desktop-smoke-key-not-a-real-credential'
     Set-Control 103 $testPort
+    Set-Control 104 'test-pool'
     Set-Control 105 $policyFile
     Click-Control 201
     Wait-Until { Test-Path -LiteralPath $settingsFile }

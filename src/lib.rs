@@ -6,6 +6,7 @@ pub mod desktop;
 pub mod merchant_transport;
 pub mod protocol;
 pub mod proxy;
+pub mod routing;
 #[cfg(feature = "snp-verifier")]
 pub mod snp;
 #[cfg(feature = "tdx-verifier")]

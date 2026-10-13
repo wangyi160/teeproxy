@@ -23,6 +23,7 @@ pub struct Profile {
     pub tdx_policy: String,
     pub snp_policy: String,
     pub pool: String,
+    pub routing: crate::routing::Policy,
 }
 impl Default for Profile {
     fn default() -> Self {
@@ -32,6 +33,7 @@ impl Default for Profile {
             tdx_policy: String::new(),
             snp_policy: String::new(),
             pool: String::new(),
+            routing: Default::default(),
         }
     }
 }
@@ -66,6 +68,7 @@ impl Profile {
             snp_policy: policy(&self.snp_policy),
             client_key_env: (!secrets.client_key.is_empty()).then(|| "TEEPROXY_CLIENT_KEY".into()),
             pool: (!self.pool.trim().is_empty()).then(|| self.pool.trim().to_owned()),
+            routing: self.routing.clone(),
             max_in_flight: 16,
             max_connections: 128,
             stream_idle_secs: 120,

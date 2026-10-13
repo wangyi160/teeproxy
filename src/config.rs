@@ -15,6 +15,8 @@ pub struct Config {
     pub snp_policy: Option<PathBuf>,
     pub client_key_env: Option<String>,
     pub pool: Option<String>,
+    #[serde(default)]
+    pub routing: crate::routing::Policy,
     #[serde(default = "concurrency")]
     pub max_in_flight: usize,
     #[serde(default = "connections")]
@@ -47,6 +49,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        self.routing.validate()?;
         ensure!(
             self.listen.ip().is_loopback(),
             "The proxy must listen on a loopback IP"

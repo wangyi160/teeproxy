@@ -89,6 +89,16 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                     return Ok::<_, Infallible>(Response::new(Body::from(value.to_string())));
                                 }
                                 captured.lock().unwrap().push(Captured { path: parts.uri.to_string(), headers: parts.headers, body: bytes });
+                                if response_mode == "automatic" || response_mode == "automatic-price-changed" {
+                                    let (models, pools) = crate::routing::tests::fixture();
+                                    if parts.uri.path() == "/v1/models" { return Ok(Response::new(Body::from(models.to_string()))); }
+                                    if parts.uri.path() == "/v1/pools" { return Ok(Response::new(Body::from(pools.to_string()))); }
+                                    if response_mode == "automatic-price-changed" {
+                                        let mut response = Response::new(Body::from("{\"error\":{\"code\":\"price_changed\"}}"));
+                                        *response.status_mut() = hyper::StatusCode::CONFLICT;
+                                        return Ok(response);
+                                    }
+                                }
                                 if response_mode == "catalog" || response_mode == "catalog-denied" {
                                     if response_mode == "catalog-denied" && parts.uri.path() == "/v1/pools" {
                                         let mut response = Response::new(Body::from("DO_NOT_DISPLAY_SERVER_BODY"));
@@ -168,6 +178,103 @@ fn agent() -> reqwest::Client {
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()
+}
+
+#[tokio::test]
+async fn automatic_routing_uses_attested_quotes_and_overrides_caller_pool_without_rewriting_body() {
+    let upstream = upstream("teeproxy-unit-test", "automatic").await;
+    let mut config = config(&upstream);
+    config.pool = Some("m_c.pool".into());
+    config.routing.automatic = true;
+    let proxy = proxy(config, true, None).await;
+    let body = "{\n  \"model\":\"model-a\", \"input\":\"hello\"\n}";
+    let response = agent()
+        .post(format!("{}/v1/responses", proxy.url))
+        .header("x-router-pool", "m_c.pool")
+        .header("x-router-price-version", "1")
+        .header("x-router-account", "do-not-pin-an-account")
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    assert_eq!(response.headers()["x-teeproxy-pool"], "m_a.pool");
+    assert_eq!(response.headers()["x-teeproxy-multiplier"], "0.2");
+    response.bytes().await.unwrap();
+    let calls = upstream.calls.lock().unwrap();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(calls[0].path, "/v1/models");
+    assert_eq!(calls[1].path, "/v1/pools");
+    assert_eq!(calls[2].headers["x-router-pool"], "m_a.pool");
+    assert_eq!(calls[2].headers["x-router-price-version"], "7");
+    assert!(!calls[2].headers.contains_key("x-router-account"));
+    assert_eq!(calls[2].body.as_ref(), body.as_bytes());
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn automatic_routing_fails_closed_for_budget_and_price_changes_without_replay() {
+    let upstream = upstream("teeproxy-unit-test", "automatic-price-changed").await;
+    let mut config = config(&upstream);
+    config.routing.automatic = true;
+    let gateway = proxy(config.clone(), true, None).await;
+    for _ in 0..2 {
+        let response = agent()
+            .post(format!("{}/v1/responses", gateway.url))
+            .json(&json!({"model":"model-a","input":"test"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 409);
+        response.bytes().await.unwrap();
+    }
+    assert_eq!(
+        upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.path == "/v1/responses")
+            .count(),
+        2
+    );
+    assert_eq!(
+        upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.path == "/v1/models")
+            .count(),
+        2
+    );
+    config.routing.max_multiplier_millionths = 100000;
+    let gateway = proxy(config, true, None).await;
+    let response = agent()
+        .post(format!("{}/v1/responses", gateway.url))
+        .json(&json!({"model":"model-a","input":"test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 503);
+    assert!(
+        response
+            .text()
+            .await
+            .unwrap()
+            .contains("routing_no_matching_pool")
+    );
+    assert_eq!(
+        upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c.path == "/v1/responses")
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]

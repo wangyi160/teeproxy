@@ -4,10 +4,12 @@
 pub(crate) mod catalog;
 mod inventory_ui;
 mod layout_ui;
+mod routing_ui;
 pub mod settings;
 mod tray;
 use inventory_ui::*;
 use layout_ui::*;
+use routing_ui::*;
 
 use crate::{client, proxy::Proxy};
 use anyhow::{Context, Result, ensure};
@@ -58,6 +60,7 @@ enum Event {
     Failed(u64, String),
     Stopped(u64),
     Inventory(u64, std::result::Result<catalog::Catalog, String>),
+    Route(u64, String),
 }
 struct Control {
     id: u16,
@@ -504,6 +507,7 @@ impl App {
             tdx_policy: self.text(TDX),
             snp_policy: self.text(SNP),
             pool: self.text(POOL),
+            routing: self.routing_policy()?,
         };
         let secrets = Secrets {
             router_key: self.text(ROUTER_KEY),
@@ -514,6 +518,7 @@ impl App {
     }
     unsafe fn busy(&self, value: bool) {
         let value = value || self.inventory_task.is_some();
+        self.update_route_controls(value);
         EnableWindow(
             self.by_id[&REFRESH],
             (self.inventory_task.is_none()
@@ -558,10 +563,17 @@ impl App {
                 let (profile, secrets) = self.snapshot()?;
                 settings::save(&self.path, &profile, &secrets)?;
                 self.append("配置已保存，密钥已使用当前 Windows 用户加密。");
+                self.update_route_summary();
             }
             VERIFY | START if self.task.is_none() && self.inventory_task.is_none() => {
                 let (profile, secrets) = self.snapshot()?;
                 let config = profile.config(&secrets, self.path.parent().unwrap())?;
+                if id == START {
+                    ensure!(
+                        config.routing.automatic || config.pool.is_some(),
+                        "请先在路由策略页选择账号池"
+                    );
+                }
                 self.generation += 1;
                 self.finished_observed = false;
                 let generation = self.generation;
@@ -599,6 +611,8 @@ impl App {
                             let local_key = (!secrets.client_key.is_empty())
                                 .then_some(secrets.client_key.as_str());
                             let proxy = Proxy::new(config, trust, &secrets.router_key, local_key)?;
+                            let route_sender = sender.clone();
+                            proxy.observe_routes(std::sync::Arc::new(move |message| { let _ = route_sender.send(Event::Route(generation, message)); }));
                             let listener = tokio::net::TcpListener::bind(address)
                                 .await
                                 .context("本地端口无法监听，可能已被占用")?;
@@ -623,6 +637,7 @@ impl App {
             REFRESH | COPY_MODEL | USE_POOL | MODEL_POOL | VIEW_POOL_MODELS => {
                 self.inventory_action(id)?
             }
+            ROUTE_MODE..=ROUTE_COPY => self.routing_action(id)?,
             tray::OPEN => tray::restore(self.hwnd),
             tray::TOGGLE => {
                 if self.task.is_some() || self.inventory_task.is_some() {
@@ -719,6 +734,10 @@ impl App {
                     if generation == self.generation && !self.stopping =>
                 {
                     self.running = true;
+                    self.set(
+                        ROUTE_CURRENT,
+                        &format!("运行中：{}", self.text(ROUTE_OVERVIEW)),
+                    );
                     self.set(URL, &url);
                     self.status("运行中 · 每条上游连接独立验证", rgb(20, 117, 73));
                     self.append(&format!("网关已启动：{url}"));
@@ -765,6 +784,13 @@ impl App {
                     self.busy(false);
                     self.status("已停止", rgb(90, 99, 112));
                     self.append("网关已停止或验证已取消，现有连接已关闭。");
+                    self.update_route_summary();
+                }
+                Event::Route(generation, message)
+                    if generation == self.generation && self.running =>
+                {
+                    self.set(ROUTE_CURRENT, &message);
+                    self.append(&message);
                 }
                 _ => {}
             }
@@ -881,6 +907,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
+                if [
+                    ROUTE_MODE,
+                    ROUTE_POOL,
+                    ROUTE_PROVIDER,
+                    ROUTE_PRIORITY,
+                    ROUTE_MODEL,
+                ]
+                .contains(&id)
+                    && notification == CBN_SELCHANGE as u16
+                {
+                    if let Err(error) = app.routing_action(id) {
+                        app.append(&error.to_string());
+                    }
+                    return 0;
+                }
+                if id == ROUTE_MAX && notification == EN_CHANGE as u16 {
+                    app.update_route_summary();
+                    return 0;
+                }
                 if id == MODEL_POOL && notification == CBN_SELCHANGE as u16 {
                     app.set(SEARCH, "");
                     app.render_catalog();

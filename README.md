@@ -12,7 +12,7 @@ agent 通过 base URL 直连本机的 teeproxy。默认入口使用回环 HTTP�
 
 ## Windows 桌面版
 
-双击 `teeproxy.exe` 打开原生 Win32 窗口。左侧导航切换概览、模型列表、账号池、连接设置和运行记录，右侧显示当前页面的详情。在连接设置填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口、账号池及可选本地 key。
+双击 `teeproxy.exe` 打开原生 Win32 窗口。左侧导航切换概览、模型列表、账号池、连接设置、运行记录和路由策略，右侧显示当前页面的详情。在连接设置填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口及可选本地 key；在路由策略选择账号池。
 
 - **保存设置**：将设置保存到当前 Windows 用户目录，密钥由 Windows DPAPI 加密。
 - **验证连接**：在后台校验真实 router，显示校验结果，不发送业务密钥。
@@ -20,13 +20,14 @@ agent 通过 base URL 直连本机的 teeproxy。默认入口使用回环 HTTP�
 - **概览**：查看本地 `/v1` 地址、上游地址及模型和账号池数量，点击“复制地址”用于 agent 的 base URL。
 - **模型 / 账号池**：按账号池浏览当前 key 可访问的模型，查看商户、倍率、上游账号与可用状态。选择模型后，“使用此池并复制模型”会保存对应账号池并复制模型 ID；切换运行中的账号池须先停止代理。倍率由商户按池设置，1× 表示官方基准价，0.2× 表示其 20%；Workbuddy 使用测试基准。刷新前先通过 TEE 验证。
 - **账号池与账号明细**：账号池页采用上下两个联动列表。上方每个池一行，显示商户、倍率、账号数量、供应商和状态；点击池后，下方仅显示该池的账号、可用状态和模型目录。账号数量包含停用账号，空池显示 0。
+- **路由策略**：指定一个账号池，或按模型大类、具体模型、倍率上限自动匹配。费率优先选择最低倍率；速率优先按真实流式请求的首字时间及生成速度选择。模型可跟随 Agent 请求；不修改请求模型或正文。无匹配池会报错，自动请求绑定报价版本以防倍率在选池后变化。当前策略与实际选择会在界面显示。
 - **系统托盘**：最小化或关闭窗口后继续转发；点击托盘图标恢复，右键选择“退出 teeproxy”结束程序。
 
 Windows 发行包见 [Releases](https://github.com/wangyi160/teeproxy/releases)。具体操作、配置保存位置和后台行为见 [桌面版说明](docs/DESKTOP.md)。
 
 ![Windows 原生桌面概览](docs/images/windows-overview.png)
 
-[连接设置](docs/images/windows-desktop.png) · [模型页](docs/images/windows-models.png) · [账号池页](docs/images/windows-accounts.png)。截图使用示例地址；连接并刷新后显示当前 key 可访问的真实数据。
+[连接设置](docs/images/windows-desktop.png) · [模型页](docs/images/windows-models.png) · [账号池页](docs/images/windows-accounts.png) · [路由策略](docs/images/windows-routing.png)。截图使用示例地址；连接并刷新后显示当前 key 可访问的真实数据。
 
 ## 源码构建和命令行
 

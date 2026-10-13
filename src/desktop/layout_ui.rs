@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) const NAV_FIRST: u16 = 501;
-pub(super) const NAV_LAST: u16 = 505;
+pub(super) const NAV_LAST: u16 = 506;
 pub(super) const PAGE_TITLE: u16 = 509;
 pub(super) const PAGE_DESCRIPTION: u16 = 510;
 pub(super) const OPEN_SETTINGS: u16 = 511;
@@ -18,7 +18,8 @@ pub(super) const MODEL_PAGE: usize = 1;
 pub(super) const ACCOUNT_PAGE: usize = 2;
 pub(super) const SETTINGS_PAGE: usize = 3;
 pub(super) const LOG_PAGE: usize = 4;
-const PAGES: [(&str, &str); 5] = [
+pub(super) const ROUTE_PAGE: usize = 5;
+const PAGES: [(&str, &str); 6] = [
     ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
     (
         "模型列表",
@@ -27,6 +28,7 @@ const PAGES: [(&str, &str); 5] = [
     ("账号池", "在上方选择账号池，下方查看该池的账号及状态。"),
     ("连接设置", "配置上游 Router 与本地代理服务。"),
     ("运行记录", "查看连接验证、列表刷新和代理运行的详细记录。"),
+    ("路由策略", "指定账号池，或按模型、倍率和实测速度自动匹配。"),
 ];
 
 impl App {
@@ -119,8 +121,11 @@ impl App {
             [268, 392, -316, 26],
             0,
         )?;
-        self.label(
-            "请求转发前会独立校验 Router 的 TEE 证明。",
+        self.add(
+            ROUTE_OVERVIEW,
+            w!("STATIC"),
+            "尚未选择账号池",
+            SS_LEFT,
             [268, 432, -316, 22],
             2,
         )?;
@@ -203,7 +208,13 @@ impl App {
             "8899",
         )?;
         self.label("账号池", [546, 520, 72, 24], 0)?;
-        self.edit(POOL, &profile.pool, [624, 511, -684, 38], 0, "使用默认池")?;
+        self.edit(
+            POOL,
+            &profile.pool,
+            [624, 511, -684, 38],
+            ES_READONLY as u32,
+            "在路由策略页选择",
+        )?;
         self.label("本地密钥", [268, 574, 132, 24], 0)?;
         self.edit(
             CLIENT_KEY,
@@ -234,11 +245,14 @@ impl App {
             2,
         )?;
         self.building_page = None;
+        self.build_routing(profile)?;
+        self.building_page = None;
         self.update_summary();
         Ok(())
     }
 
     pub(super) unsafe fn update_summary(&self) {
+        self.update_route_summary();
         let router = self.text(ROUTER);
         self.set(
             ROUTER_SUMMARY,
@@ -269,7 +283,8 @@ impl App {
     pub(super) unsafe fn update_visibility(&self) {
         for control in &self.controls {
             let visible = match control.id {
-                REFRESH | CATALOG_STATUS => matches!(self.page, MODEL_PAGE | ACCOUNT_PAGE),
+                REFRESH => matches!(self.page, MODEL_PAGE | ACCOUNT_PAGE | ROUTE_PAGE),
+                CATALOG_STATUS => matches!(self.page, MODEL_PAGE | ACCOUNT_PAGE),
                 MODELS_EMPTY => self.page == MODEL_PAGE && self.model_rows.is_empty(),
                 POOLS_EMPTY => self.page == ACCOUNT_PAGE && self.catalog.pools.is_empty(),
                 ACCOUNTS_EMPTY => {
@@ -283,7 +298,7 @@ impl App {
     }
 
     pub(super) unsafe fn select_page(&mut self, page: usize) {
-        self.page = page.min(LOG_PAGE);
+        self.page = page.min(ROUTE_PAGE);
         let (title, description) = PAGES[self.page];
         self.set(PAGE_TITLE, title);
         self.set(PAGE_DESCRIPTION, description);
@@ -346,6 +361,7 @@ impl App {
             MODEL_PAGE => vec![[244, 230, -280, -318]],
             ACCOUNT_PAGE => vec![[244, 186, -280, 210], [244, 412, -280, -500]],
             LOG_PAGE => vec![[244, 128, -280, -184]],
+            ROUTE_PAGE => vec![[244, 128, -280, 490], [244, 680, -280, 42]],
             _ => Vec::new(),
         };
         for card in cards {
@@ -434,7 +450,9 @@ impl App {
         rounded(dc, &item.rcItem, self.scale(7), fill, border);
         let mut rect = item.rcItem;
         let flags = if nav {
-            let symbols = ["\u{e80f}", "\u{e8a5}", "\u{e716}", "\u{e713}", "\u{e81c}"];
+            let symbols = [
+                "\u{e80f}", "\u{e8a5}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}",
+            ];
             let mut icon = rect;
             icon.left += self.scale(16);
             icon.right = icon.left + self.scale(22);

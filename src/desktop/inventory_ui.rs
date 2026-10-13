@@ -233,6 +233,7 @@ impl App {
         };
         SendMessageW(selector, CB_SETCURSEL, index.unwrap_or(usize::MAX), 0);
         self.render_pools(account_preferred.as_deref());
+        self.refresh_route_pools();
         self.render_catalog();
     }
     pub(super) fn account_pool(&self) -> Option<&catalog::Pool> {
@@ -409,6 +410,7 @@ impl App {
         self.catalog_loaded = false;
         SendMessageW(self.by_id[&MODEL_POOL], CB_RESETCONTENT, 0, 0);
         self.render_pools(None);
+        self.refresh_route_pools();
         self.render_catalog();
         self.set(CATALOG_STATUS, "配置已修改 · 请刷新列表");
     }
@@ -416,13 +418,19 @@ impl App {
         ensure!(
             self.inventory_task.is_none()
                 && !self.stopping
-                && (self.task.is_none() || (self.running && self.text(POOL) == pool)),
+                && (self.task.is_none()
+                    || (self.running
+                        && !self.routing_policy()?.automatic
+                        && self.text(POOL) == pool)),
             "请先停止代理再切换账号池；当前代理仍使用原账号池"
         );
         let (mut profile, secrets) = self.snapshot()?;
         profile.pool = pool.into();
+        profile.routing.automatic = false;
         settings::save(&self.path, &profile, &secrets)?;
         self.set(POOL, pool);
+        SendMessageW(self.by_id[&ROUTE_MODE], CB_SETCURSEL, 0, 0);
+        self.refresh_route_pools();
         self.update_summary();
         Ok(())
     }
@@ -517,7 +525,7 @@ impl App {
                     .clone();
                 self.select_inventory_pool(&pool)?;
                 self.append(&format!("已保存账号池 {pool}；下次启动生效。"));
-                self.select_page(SETTINGS_PAGE);
+                self.select_page(ROUTE_PAGE);
             }
             _ => {}
         }
@@ -644,6 +652,18 @@ mod tests {
                 ]});
                 let catalog = catalog::parse(&models, &pools).unwrap();
                 state.replace_catalog(catalog);
+                SendMessageW(state.by_id[&ROUTE_MODE], CB_SETCURSEL, 1, 0);
+                state.routing_action(ROUTE_MODE).unwrap();
+                SendMessageW(state.by_id[&ROUTE_PROVIDER], CB_SETCURSEL, 1, 0);
+                state.routing_action(ROUTE_PROVIDER).unwrap();
+                state.set(ROUTE_MODEL, "beta");
+                state.set(ROUTE_MAX, "0.25");
+                state.action(ROUTE_SAVE).unwrap();
+                let saved_policy = settings::load(&state.path).unwrap().0.routing;
+                assert!(saved_policy.automatic);
+                assert_eq!(saved_policy.provider, "openai");
+                assert_eq!(saved_policy.model, "beta");
+                assert_eq!(saved_policy.max_multiplier_millionths, 250000);
                 assert_eq!(state.model_pool().unwrap().id, "pool-b");
                 assert_eq!(state.account_pool().unwrap().id, "pool-b");
                 assert_eq!(SendMessageW(state.by_id[&POOLS], LVM_GETITEMCOUNT, 0, 0), 3);
@@ -685,9 +705,13 @@ mod tests {
                 assert_eq!(state.catalog.models[state.model_rows[0]].id, "beta");
                 let index = state.model_rows[0];
                 assert_eq!(state.use_model(index).unwrap(), "beta");
+                assert!(!settings::load(&state.path).unwrap().0.routing.automatic);
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 state.task = Some(state.runtime.spawn(std::future::pending::<()>()));
                 state.running = true;
+                SendMessageW(state.by_id[&ROUTE_MODE], CB_SETCURSEL, 1, 0);
+                assert!(state.use_model(index).is_err());
+                SendMessageW(state.by_id[&ROUTE_MODE], CB_SETCURSEL, 0, 0);
                 SendMessageW(state.by_id[&MODEL_POOL], CB_SETCURSEL, 0, 0);
                 state.inventory_action(MODEL_POOL).unwrap();
                 assert_eq!(state.model_rows.len(), 2);
@@ -739,7 +763,7 @@ mod tests {
                 assert_eq!(state.model_pool().unwrap().id, "pool-a");
                 state.inventory_action(USE_POOL).unwrap();
                 assert_eq!(state.text(POOL), "pool-a");
-                assert_eq!(state.page, SETTINGS_PAGE);
+                assert_eq!(state.page, ROUTE_PAGE);
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
                 state.replace_catalog(
                     catalog::parse(

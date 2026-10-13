@@ -68,6 +68,7 @@ struct ForwardBody {
     permit: Option<OwnedSemaphorePermit>,
     idle: Pin<Box<Sleep>>,
     idle_duration: Duration,
+    measurement: Option<crate::routing::Observation>,
 }
 impl Body for ForwardBody {
     type Data = Bytes;
@@ -79,6 +80,9 @@ impl Body for ForwardBody {
         let this = self.get_mut();
         match Pin::new(&mut this.inner).poll_frame(cx) {
             Poll::Ready(None) => {
+                if let Some(measurement) = &mut this.measurement {
+                    measurement.finish();
+                }
                 if let Some(session) = this.session.take() {
                     this.pool.put(session);
                 }
@@ -86,17 +90,28 @@ impl Body for ForwardBody {
                 Poll::Ready(None)
             }
             Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref()
+                    && let Some(measurement) = &mut this.measurement
+                {
+                    measurement.feed(data);
+                }
                 this.idle
                     .as_mut()
                     .reset(tokio::time::Instant::now() + this.idle_duration);
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(_))) => {
+                if let Some(measurement) = &mut this.measurement {
+                    measurement.fail();
+                }
                 this.session.take();
                 this.permit.take();
                 Poll::Ready(Some(Err(io::Error::other("Router stream interrupted"))))
             }
             Poll::Pending if this.idle.as_mut().poll(cx).is_ready() => {
+                if let Some(measurement) = &mut this.measurement {
+                    measurement.fail();
+                }
                 this.session.take();
                 this.permit.take();
                 Poll::Ready(Some(Err(io::Error::new(
@@ -116,6 +131,7 @@ pub struct Proxy {
     connections: Arc<Semaphore>,
     router_auth: HeaderValue,
     client_key: Option<zeroize::Zeroizing<String>>,
+    routing: Arc<crate::routing::State>,
 }
 
 impl Proxy {
@@ -154,12 +170,16 @@ impl Proxy {
             }),
             router_auth,
             client_key: client_key.map(|key| zeroize::Zeroizing::new(key.to_owned())),
+            routing: Default::default(),
             config,
         }))
     }
 
     pub async fn serve(self: Arc<Self>, listener: TcpListener) -> Result<()> {
         self.serve_until(listener, std::future::pending()).await
+    }
+    pub fn observe_routes(&self, observer: Arc<dyn Fn(String) + Send + Sync>) {
+        self.routing.observe(observer);
     }
 
     /// Stops accepting and closes all existing client streams before returning.
@@ -282,11 +302,61 @@ impl Proxy {
             Ok(data) => data,
             Err(code) => return failure(code, "invalid_content_encoding_or_body_limit"),
         };
+        let automatic = self.config.routing.automatic && parts.method == Method::POST;
+        let route_model = if automatic {
+            let Some(protocol) = crate::routing::protocol(uri.path()) else {
+                return failure(400, "automatic_routing_unsupported_protocol");
+            };
+            let Ok(value) = serde_json::from_slice::<serde_json::Value>(&data) else {
+                return failure(400, "routing_invalid_request");
+            };
+            let Some(model) = value["model"].as_str().filter(|m| !m.is_empty()) else {
+                return failure(400, "routing_model_required");
+            };
+            Some((model.to_owned(), protocol))
+        } else {
+            None
+        };
         // Credentials and request bytes cannot reach this connection before take()
         // has independently verified evidence and its binding to this exact TLS key.
         let mut session = match self.pool.take().await {
             Ok(session) => session,
             Err(_) => return failure(502, "router_attestation_failed"),
+        };
+        let mut measurement = if let Some((model, protocol)) = route_model {
+            let rows = match self
+                .routing
+                .inventory(&mut session, &self.router_auth)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => {
+                    self.routing
+                        .notify("自动匹配失败：无法读取可信目录，未转发请求".into());
+                    return failure(503, "routing_inventory_unavailable");
+                }
+            };
+            match self
+                .routing
+                .choose(&rows, &self.config.routing, &model, protocol)
+            {
+                Ok(observation) => Some(observation),
+                Err(code) => {
+                    self.routing
+                        .notify(format!("自动匹配失败：{code}，未转发请求"));
+                    self.pool.put(session);
+                    return failure(
+                        if code == "routing_model_mismatch" {
+                            400
+                        } else {
+                            503
+                        },
+                        code,
+                    );
+                }
+            }
+        } else {
+            None
         };
         let mut request = Request::new(Full::new(data));
         *request.method_mut() = parts.method;
@@ -295,7 +365,19 @@ impl Proxy {
         request
             .headers_mut()
             .insert("authorization", self.router_auth.clone());
-        if let Some(pool) = &self.config.pool {
+        if let Some(measurement) = &measurement {
+            request.headers_mut().remove("x-router-account");
+            request.headers_mut().insert(
+                "x-router-pool",
+                measurement.candidate.pool.parse().expect("validated pool"),
+            );
+            request.headers_mut().insert(
+                "x-router-price-version",
+                measurement.candidate.version.into(),
+            );
+        } else if !self.config.routing.automatic
+            && let Some(pool) = &self.config.pool
+        {
             request
                 .headers_mut()
                 .insert("x-router-pool", pool.parse().expect("validated pool"));
@@ -303,9 +385,34 @@ impl Proxy {
         let response = match session.send_request(request).await {
             Ok(response) => response,
             // Never retry a request once its send has started.
-            Err(_) => return failure(502, "router_connection_failed_request_not_replayed"),
+            Err(_) => {
+                if let Some(measurement) = &mut measurement {
+                    measurement.fail();
+                }
+                return failure(502, "router_connection_failed_request_not_replayed");
+            }
         };
+        if measurement.is_some() && response.status() == StatusCode::CONFLICT {
+            self.routing.invalidate().await;
+        }
         let (parts, body) = response.into_parts();
+        if let Some(measurement) = &mut measurement {
+            measurement.response(
+                parts.status.as_u16(),
+                parts
+                    .headers
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| {
+                        v.split(';')
+                            .next()
+                            .is_some_and(|v| v.trim().eq_ignore_ascii_case("text/event-stream"))
+                    }),
+            );
+        }
+        let selected = measurement
+            .as_ref()
+            .map(|m| (m.candidate.pool.clone(), m.candidate.multiplier));
         let duration = Duration::from_secs(self.config.stream_idle_secs);
         let body = ForwardBody {
             inner: body,
@@ -314,6 +421,7 @@ impl Proxy {
             permit: Some(permit),
             idle: Box::pin(tokio::time::sleep(duration)),
             idle_duration: duration,
+            measurement,
         };
         let mut response = Response::new(body.boxed_unsync());
         *response.status_mut() = parts.status;
@@ -321,6 +429,17 @@ impl Proxy {
         response
             .headers_mut()
             .insert("cache-control", HeaderValue::from_static("no-store"));
+        if let Some((pool, multiplier)) = selected {
+            response
+                .headers_mut()
+                .insert("x-teeproxy-pool", pool.parse().expect("validated pool"));
+            response.headers_mut().insert(
+                "x-teeproxy-multiplier",
+                crate::routing::format_multiplier(multiplier)
+                    .parse()
+                    .expect("formatted multiplier"),
+            );
+        }
         response
     }
 }
