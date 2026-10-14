@@ -82,13 +82,15 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(501,502,503,504,505,506,302,303,304,307,309,310,311,312,313,314,315,601,602,605,606,607,609)) {
+    foreach ($id in @(501,502,503,504,505,506,507,302,303,304,307,309,310,311,312,313,314,315,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
     foreach ($id in @(603,604,608)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -ne [IntPtr]::Zero) { throw "Removed routing control $id still exists" }
     }
     if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,605))) { throw 'Fixed pool maximum is disabled' }
+    Select-Page 6
+    if (-not (Control-Shown 701) -or -not (Control-Shown 702) -or -not (Control-Shown 704) -or (Control-Shown 302) -or (Control-Shown 312)) { throw 'Official pricing page visibility failed' }
     Select-Page 1
     if (-not (Control-Shown 302) -or -not (Control-Shown 309) -or -not (Control-Shown 310) -or (Control-Shown 303) -or (Control-Shown 312) -or (Control-Shown 101)) { throw 'Model tab visibility failed' }
     Select-Page 2

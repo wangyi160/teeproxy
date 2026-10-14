@@ -112,6 +112,7 @@ pub fn allowed_api(method: &str, path: &str) -> bool {
         (
             "GET",
             "/v1/models"
+                | "/v1/pricing"
                 | "/v1/pools"
                 | "/v1/usage"
                 | "/v1/identity"

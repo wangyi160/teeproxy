@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) const NAV_FIRST: u16 = 501;
-pub(super) const NAV_LAST: u16 = 506;
+pub(super) const NAV_LAST: u16 = 507;
 pub(super) const PAGE_TITLE: u16 = 509;
 pub(super) const PAGE_DESCRIPTION: u16 = 510;
 pub(super) const OPEN_SETTINGS: u16 = 511;
@@ -19,7 +19,8 @@ pub(super) const ACCOUNT_PAGE: usize = 2;
 pub(super) const SETTINGS_PAGE: usize = 3;
 pub(super) const LOG_PAGE: usize = 4;
 pub(super) const ROUTE_PAGE: usize = 5;
-const PAGES: [(&str, &str); 6] = [
+pub(super) const PRICE_PAGE: usize = 6;
+const PAGES: [(&str, &str); 7] = [
     ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
     (
         "模型列表",
@@ -29,6 +30,10 @@ const PAGES: [(&str, &str); 6] = [
     ("连接设置", "配置上游 Router 与本地代理服务。"),
     ("运行记录", "查看连接验证、列表刷新和代理运行的详细记录。"),
     ("路由策略", "设置账号池与倍率上限，模型跟随 Agent 请求。"),
+    (
+        "官方价格",
+        "查看 Router 发布的完整官方价格，不受账号池和账号是否存在影响。",
+    ),
 ];
 
 impl App {
@@ -246,6 +251,7 @@ impl App {
         )?;
         self.building_page = None;
         self.build_routing(profile)?;
+        self.build_pricing()?;
         self.building_page = None;
         self.update_summary();
         Ok(())
@@ -283,7 +289,11 @@ impl App {
     pub(super) unsafe fn update_visibility(&self) {
         for control in &self.controls {
             let visible = match control.id {
-                REFRESH => matches!(self.page, MODEL_PAGE | ACCOUNT_PAGE | ROUTE_PAGE),
+                REFRESH => matches!(
+                    self.page,
+                    MODEL_PAGE | ACCOUNT_PAGE | ROUTE_PAGE | PRICE_PAGE
+                ),
+                PRICE_EMPTY => self.page == PRICE_PAGE && self.price_rows.is_empty(),
                 CATALOG_STATUS => matches!(self.page, MODEL_PAGE | ACCOUNT_PAGE),
                 MODELS_EMPTY => self.page == MODEL_PAGE && self.model_rows.is_empty(),
                 POOLS_EMPTY => self.page == ACCOUNT_PAGE && self.catalog.pools.is_empty(),
@@ -298,7 +308,15 @@ impl App {
     }
 
     pub(super) unsafe fn select_page(&mut self, page: usize) {
-        self.page = page.min(ROUTE_PAGE);
+        self.page = page.min(PRICE_PAGE);
+        self.set(
+            REFRESH,
+            if self.page == PRICE_PAGE {
+                "刷新价格"
+            } else {
+                "刷新列表"
+            },
+        );
         let (title, description) = PAGES[self.page];
         self.set(PAGE_TITLE, title);
         self.set(PAGE_DESCRIPTION, description);
@@ -362,6 +380,7 @@ impl App {
             ACCOUNT_PAGE => vec![[244, 186, -280, 210], [244, 412, -280, -500]],
             LOG_PAGE => vec![[244, 128, -280, -184]],
             ROUTE_PAGE => vec![[244, 128, -280, 382], [244, 572, -280, 42]],
+            PRICE_PAGE => vec![[244, 174, -280, -258]],
             _ => Vec::new(),
         };
         for card in cards {
@@ -451,7 +470,7 @@ impl App {
         let mut rect = item.rcItem;
         let flags = if nav {
             let symbols = [
-                "\u{e80f}", "\u{e8a5}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}",
+                "\u{e80f}", "\u{e8a5}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}",
             ];
             let mut icon = rect;
             icon.left += self.scale(16);

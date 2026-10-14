@@ -22,6 +22,7 @@ impl App {
             (MODELS, &[330, 148, 244][..]),
             (POOLS, &[144, 120, 104, 84, 152, 124][..]),
             (ACCOUNTS, &[268, 160, 96, 112, 88][..]),
+            (PRICES, &[220, 96, 210, 88, 88, 88][..]),
         ] {
             if let Some(hwnd) = self.by_id.get(&id) {
                 for (column, width) in widths.iter().enumerate() {
@@ -159,7 +160,7 @@ impl App {
         self.building_page = None;
         Ok(())
     }
-    unsafe fn table(&mut self, id: u16, columns: &[(&str, i32)]) -> Result<()> {
+    pub(super) unsafe fn table(&mut self, id: u16, columns: &[(&str, i32)]) -> Result<()> {
         let hwnd = self.add(
             id,
             WC_LISTVIEWW,
@@ -168,6 +169,7 @@ impl App {
             match id {
                 MODELS => [260, 280, -312, -380],
                 POOLS => [260, 234, -312, 152],
+                PRICES => [260, 236, -312, -510],
                 _ => [260, 460, -312, -560],
             },
             0,
@@ -535,11 +537,11 @@ impl App {
         Ok(())
     }
 }
-unsafe fn selected(hwnd: HWND) -> Option<usize> {
+pub(super) unsafe fn selected(hwnd: HWND) -> Option<usize> {
     let index = SendMessageW(hwnd, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
     (index >= 0).then_some(index as usize)
 }
-unsafe fn fill<T: AsRef<str>>(hwnd: HWND, rows: &[Vec<T>]) {
+pub(super) unsafe fn fill<T: AsRef<str>>(hwnd: HWND, rows: &[Vec<T>]) {
     // WM_SETREDRAW(TRUE) sets WS_VISIBLE, so never use it on a hidden page.
     let shown = GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_VISIBLE as isize != 0;
     if shown {
@@ -647,6 +649,39 @@ mod tests {
                         Secrets::default(),
                     )))
                     .unwrap();
+                // The price page must work before any account or pool exists.
+                let initial_page = state.page;
+                state.price_book = pricing::parse(&pricing::tests::fixture()).unwrap();
+                state.prices_loaded = true;
+                state.render_prices();
+                state.select_page(PRICE_PAGE);
+                assert!(state.catalog.pools.is_empty());
+                assert_eq!(
+                    SendMessageW(state.by_id[&PRICES], LVM_GETITEMCOUNT, 0, 0),
+                    4
+                );
+                assert_eq!(cell_text(state.by_id[&PRICES], 0, 3), "1.25");
+                assert!(state.text(PRICE_DETAILS).contains("官方来源"));
+                assert_ne!(
+                    GetWindowLongPtrW(state.by_id[&PRICES], GWL_STYLE) & WS_VISIBLE as isize,
+                    0
+                );
+                assert_eq!(
+                    GetWindowLongPtrW(state.by_id[&MODELS], GWL_STYLE) & WS_VISIBLE as isize,
+                    0
+                );
+                SendMessageW(state.by_id[&PRICE_PROVIDER], CB_SETCURSEL, 3, 0);
+                state.render_prices();
+                assert_eq!(
+                    SendMessageW(state.by_id[&PRICES], LVM_GETITEMCOUNT, 0, 0),
+                    2
+                );
+                assert!(cell_text(state.by_id[&PRICES], 1, 2).contains("≥ 200000"));
+                state.set(PRICE_SEARCH, "no-match");
+                state.render_prices();
+                assert!(state.price_rows.is_empty());
+                state.set(PRICE_SEARCH, "");
+                state.select_page(initial_page);
                 let models = serde_json::json!({"data":[{"id":"chatgpt/alpha","router_provider":"openai","router_model":"alpha","router_pools":["pool-a"]},{"id":"chatgpt/beta","router_provider":"openai","router_model":"beta","router_pools":["pool-a","pool-b"]}]});
                 let mut pools = serde_json::json!({"data":[
                     {"id":"pool-a","accounts":[{"id":"account-a","enabled":true,"available":true},{"id":"account-b","enabled":false,"available":false}]},

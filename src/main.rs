@@ -3,7 +3,10 @@ use anyhow::{Context, Result, ensure};
 use std::path::Path;
 use teeproxy::{client, config::Config, proxy::Proxy};
 
-const HELP: &str = "teeproxy 0.12.3
+const HELP: &str = concat!(
+    "teeproxy ",
+    env!("CARGO_PKG_VERSION"),
+    "
 
 teeproxy                         Windows native GUI
 teeproxy gui [--settings PATH]  Windows native GUI with a separate profile
@@ -15,7 +18,8 @@ teeproxy merchant-transport --config teeproxy.toml
 Set your agent API base URL to http://127.0.0.1:8899/v1.
 The gateway verifies the router before sending data over upstream TLS.
 The router key is read only from the environment named by router_key_env.
-";
+"
+);
 
 fn main() {
     #[cfg(windows)]

@@ -4,11 +4,14 @@
 pub(crate) mod catalog;
 mod inventory_ui;
 mod layout_ui;
+mod pricing;
+mod pricing_ui;
 mod routing_ui;
 pub mod settings;
 mod tray;
 use inventory_ui::*;
 use layout_ui::*;
+use pricing_ui::*;
 use routing_ui::*;
 
 use crate::{client, proxy::Proxy};
@@ -60,6 +63,7 @@ enum Event {
     Failed(u64, String),
     Stopped(u64),
     Inventory(u64, std::result::Result<catalog::Catalog, String>),
+    Prices(u64, std::result::Result<pricing::Book, String>),
     Route(u64, String),
 }
 struct Control {
@@ -94,6 +98,9 @@ struct App {
     catalog: catalog::Catalog,
     catalog_loaded: bool,
     model_rows: Vec<usize>,
+    price_book: pricing::Book,
+    prices_loaded: bool,
+    price_rows: Vec<usize>,
     account_pool_id: Option<String>,
     inventory_task: Option<JoinHandle<()>>,
     inventory_generation: u64,
@@ -132,6 +139,9 @@ impl App {
             catalog: Default::default(),
             catalog_loaded: false,
             model_rows: Vec::new(),
+            price_book: Default::default(),
+            prices_loaded: false,
+            price_rows: Vec::new(),
             account_pool_id: None,
             inventory_task: None,
             inventory_generation: 0,
@@ -564,7 +574,15 @@ impl App {
             return Ok(());
         }
         match id {
-            NAV_FIRST..=NAV_LAST => self.select_page((id - NAV_FIRST) as usize),
+            NAV_FIRST..=NAV_LAST => {
+                self.select_page((id - NAV_FIRST) as usize);
+                if self.page == PRICE_PAGE
+                    && !self.prices_loaded
+                    && !self.text(ROUTER_KEY).is_empty()
+                {
+                    self.refresh_prices()?;
+                }
+            }
             OPEN_SETTINGS => self.select_page(SETTINGS_PAGE),
             SAVE => {
                 let (profile, secrets) = self.snapshot()?;
@@ -642,6 +660,7 @@ impl App {
                     }
                 }));
             }
+            REFRESH if self.page == PRICE_PAGE => self.refresh_prices()?,
             REFRESH | COPY_MODEL | USE_POOL | MODEL_POOL | VIEW_POOL_MODELS => {
                 self.inventory_action(id)?
             }
@@ -686,6 +705,7 @@ impl App {
             task.abort();
             self.inventory_generation += 1;
             self.set(CATALOG_STATUS, "刷新已取消 · 可重新刷新");
+            self.set(PRICE_STATUS, "刷新已取消 · 可重新刷新");
             self.busy(self.task.is_some());
         }
         if self.task.is_none() || self.stopping {
@@ -716,6 +736,33 @@ impl App {
     unsafe fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
+                Event::Prices(generation, result) if generation == self.inventory_generation => {
+                    self.inventory_task.take();
+                    match result {
+                        Ok(book) => {
+                            self.price_book = book;
+                            self.prices_loaded = true;
+                            self.render_prices();
+                            self.set(
+                                PRICE_STATUS,
+                                "官方价格已刷新 · 有报价不代表当前账号池可调用。",
+                            );
+                            self.append("已通过 TEE 验证读取完整官方价格簿。");
+                        }
+                        Err(error) => {
+                            self.set(
+                                PRICE_STATUS,
+                                if self.prices_loaded {
+                                    "刷新失败 · 当前保留上次价格，请查看运行记录。"
+                                } else {
+                                    "价格读取失败 · 请查看运行记录。"
+                                },
+                            );
+                            self.append(&error);
+                        }
+                    }
+                    self.busy(self.task.is_some());
+                }
                 Event::Inventory(generation, result) if generation == self.inventory_generation => {
                     self.inventory_task.take();
                     match result {
@@ -737,6 +784,12 @@ impl App {
                         }
                     }
                     self.busy(self.task.is_some());
+                    if self.page == PRICE_PAGE
+                        && !self.prices_loaded
+                        && let Err(error) = self.refresh_prices()
+                    {
+                        self.append(&error.to_string());
+                    }
                 }
                 Event::Started(generation, url, proxy)
                     if generation == self.generation && !self.stopping =>
@@ -828,6 +881,7 @@ impl App {
             if self.inventory_finished_observed {
                 self.inventory_task.take();
                 self.set(CATALOG_STATUS, "刷新意外结束 · 可重新刷新");
+                self.set(PRICE_STATUS, "刷新意外结束 · 可重新刷新");
                 self.append("列表刷新任务未返回完成状态。");
                 self.busy(self.task.is_some());
             } else {
@@ -906,6 +960,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             }
             WM_NOTIFY if lp != 0 => {
                 let header = &*(lp as *const NMHDR);
+                if header.idFrom == PRICES as usize && header.code == LVN_ITEMCHANGED {
+                    app.price_selection_changed();
+                }
                 if header.idFrom == POOLS as usize && header.code == LVN_ITEMCHANGED {
                     let change = &*(lp as *const NMLISTVIEW);
                     if change.uChanged & LVIF_STATE != 0
@@ -918,6 +975,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
+                if (id == PRICE_SEARCH && notification == EN_CHANGE as u16)
+                    || (id == PRICE_PROVIDER && notification == CBN_SELCHANGE as u16)
+                {
+                    app.render_prices();
+                    return 0;
+                }
                 if [ROUTE_MODE, ROUTE_POOL, ROUTE_PRIORITY].contains(&id)
                     && notification == CBN_SELCHANGE as u16
                 {
@@ -955,6 +1018,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                     }
                     if matches!(id, ROUTER | ROUTER_KEY | TDX | SNP) {
                         app.invalidate_catalog();
+                        app.invalidate_prices();
                     }
                     app.update_summary();
                     app.status("配置已修改 · 请保存或验证连接", rgb(90, 99, 112));

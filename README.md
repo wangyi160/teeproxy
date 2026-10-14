@@ -24,7 +24,7 @@ agent 通过 base URL 直连本机的 teeproxy。默认入口使用回环 HTTP�
 - **路由策略**：指定一个账号池，或按 Agent 请求的模型自动匹配；两种模式均设置倍率上限。运行中可编辑并保存，保存后新请求立即采用新规则，正在进行的请求继续使用原规则。teeproxy 将规则随请求交给 router，由 router 统一选池、检查倍率并根据实际流式首字时间和生成速度执行速率优先。客户端不逐次拉取目录来选池，不修改模型或正文，界面显示 router 返回的实际选择。
 - **系统托盘**：最小化或关闭窗口后继续转发；点击托盘图标恢复，右键选择“退出 teeproxy”结束程序。
 
-Windows 发行包见 [Releases](https://github.com/wangyi160/teeproxy/releases)。具体操作、配置保存位置和后台行为见 [桌面版说明](docs/DESKTOP.md)。
+Windows 发行包见 [Releases](https://github.com/wangyi160/teeproxy/releases)。桌面侧栏包含独立的官方价格页，通过 Router 的 `/v1/pricing` 查看完整价格簿，不依赖账号池。具体操作、配置保存位置和后台行为见 [桌面版说明](docs/DESKTOP.md)。
 
 ![Windows 原生桌面概览](docs/images/windows-overview.png)
 

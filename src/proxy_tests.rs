@@ -117,6 +117,7 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                     let body = match parts.uri.path() {
                                         "/v1/models" => json!({"data":[{"id":"model-a", "router_pools":["pool-a"], "router_capabilities":[{"provider":"openai", "protocols":["responses"]}]}]}),
                                         "/v1/pools" => json!({"data":[{"id":"pool-a", "accounts":[{"id":"account-a", "provider":"openai", "enabled":true, "available":true, "catalog":{"state":"fetched", "visible_models":1}}]}]}),
+                                        "/v1/pricing" => json!({"revision":9,"currency":"USD","unit":"micro_usd_per_million_tokens","providers":[]}),
                                         _ => panic!("unexpected inventory path"),
                                     };
                                     return Ok(Response::new(Body::from(body.to_string())));
@@ -499,6 +500,33 @@ async fn desktop_inventory_reads_models_and_accounts_on_one_attested_connection(
         assert!(call.body.is_empty());
         assert!(!call.headers.contains_key("x-router-pool"));
     }
+}
+
+#[tokio::test]
+async fn official_prices_are_read_only_without_pool_selection_or_routing_headers() {
+    let upstream = upstream("teeproxy-unit-test", "catalog").await;
+    let mut config = config(&upstream);
+    config.pool = None;
+    config.routing.automatic = false;
+    let gateway = proxy(config, true, None).await;
+    let response = agent()
+        .get(format!("{}/v1/pricing", gateway.url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap()["revision"],
+        9
+    );
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 1);
+    let calls = upstream.calls.lock().unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].path, "/v1/pricing");
+    assert!(!calls[0].headers.contains_key("x-router-routing"));
+    assert!(!calls[0].headers.contains_key("x-router-pool"));
+    assert!(!allowed_api("PUT", "/v1/pricing"));
+    assert!(!allowed_api("GET", "/admin/pricing"));
 }
 
 #[cfg(windows)]
