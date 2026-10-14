@@ -90,11 +90,20 @@ fn joined(values: impl Iterator<Item = String>) -> String {
 }
 fn provider(value: &Value) -> String {
     match value.as_str().unwrap_or("") {
-        "openai" => "OpenAI".into(),
+        "openai" | "chatgpt" => "ChatGPT".into(),
         "anthropic" | "claude" => "Claude".into(),
         "xai" | "grok" => "Grok".into(),
         "workbuddy" => "Workbuddy（测试）".into(),
         _ => text(value),
+    }
+}
+fn model_namespace(value: &Value) -> Option<&'static str> {
+    match value.as_str()? {
+        "openai" | "chatgpt" => Some("chatgpt"),
+        "anthropic" | "claude" => Some("claude"),
+        "xai" | "grok" => Some("grok"),
+        "workbuddy" => Some("workbuddy"),
+        _ => None,
     }
 }
 fn multiplier(value: &Value) -> String {
@@ -226,19 +235,52 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             let Some(pool) = result.pools.iter().find(|p| p.id == *membership) else {
                 continue;
             };
-            let merchant = model["router_merchant"]["id"].as_str().unwrap_or("");
-            ensure!(
-                pool.merchant_id.is_empty() || merchant == pool.merchant_id,
-                "模型与账号池的商户不匹配，请刷新列表"
-            );
-            let id = if merchant.is_empty() {
+            let id = if let Some(namespace) = model_namespace(&model["router_provider"]) {
+                let raw = model["router_model"]
+                    .as_str()
+                    .context("Missing official model ID")?;
+                ensure!(
+                    !raw.is_empty() && wire_id == format!("{namespace}/{raw}"),
+                    "Model namespace does not match its provider"
+                );
+                ensure!(
+                    pool.provider.is_empty()
+                        || pool.provider == provider(&model["router_provider"]),
+                    "Model provider does not match its pool"
+                );
+                ensure!(
+                    pool.merchant_id.is_empty()
+                        || model["router_merchants"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|m| {
+                                m["id"] == pool.merchant_id
+                                    && m["pools"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .any(|p| p == membership)
+                            }),
+                    "Model merchant does not own its pool"
+                );
                 wire_id.clone()
             } else {
-                wire_id
-                    .strip_prefix(&format!("{merchant}/"))
-                    .filter(|s| !s.is_empty())
-                    .context("模型 ID 与商户不匹配")?
-                    .to_owned()
+                // Older routers still accept bare IDs with the routing rule.
+                let merchant = model["router_merchant"]["id"].as_str().unwrap_or("");
+                ensure!(
+                    pool.merchant_id.is_empty() || merchant == pool.merchant_id,
+                    "模型与账号池的商户不匹配，请刷新列表"
+                );
+                if merchant.is_empty() {
+                    wire_id.clone()
+                } else {
+                    wire_id
+                        .strip_prefix(&format!("{merchant}/"))
+                        .filter(|s| !s.is_empty())
+                        .context("模型 ID 与商户不匹配")?
+                        .to_owned()
+                }
             };
             if !seen.insert((pool.id.clone(), id.clone())) {
                 continue;
@@ -295,6 +337,49 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn provider_namespaced_models_preserve_identity_across_merchant_pools() {
+        let pools = json!({"data":[
+            {"id":"m_a.first","merchant_id":"m_a","provider":"openai","accounts":[]},
+            {"id":"m_b.second","merchant_id":"m_b","provider":"openai","accounts":[]},
+            {"id":"m_b.grok","merchant_id":"m_b","provider":"xai","accounts":[]}
+        ]});
+        let models = json!({"data":[
+            {"id":"chatgpt/shared-model","router_provider":"openai","router_model":"shared-model",
+                "router_pools":["m_a.first","m_b.second"],
+                "router_merchants":[{"id":"m_a","pools":["m_a.first"]},{"id":"m_b","pools":["m_b.second"]}]},
+            {"id":"grok/shared-model","router_provider":"xai","router_model":"shared-model",
+                "router_pools":["m_b.grok"],"router_merchants":[{"id":"m_b","pools":["m_b.grok"]}]}
+        ]});
+        let catalog = parse(&models, &pools).unwrap();
+        assert_eq!(catalog.models.len(), 3);
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .filter(|m| m.id == "chatgpt/shared-model")
+                .count(),
+            2
+        );
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .filter(|m| m.id == "grok/shared-model")
+                .count(),
+            1
+        );
+        assert_eq!(catalog.models[0].provider, "ChatGPT");
+        let mut bad = models.clone();
+        bad["data"][0]["id"] = json!("grok/shared-model");
+        assert!(parse(&bad, &pools).is_err());
+        let mut bad = models.clone();
+        bad["data"][0]["router_merchants"][0]["pools"] = json!(["m_b.second"]);
+        assert!(parse(&bad, &pools).is_err());
+        let mut bad = pools.clone();
+        bad["data"][0]["provider"] = json!("xai");
+        assert!(parse(&models, &bad).is_err());
+    }
     #[test]
     fn models_are_scoped_to_authorized_pools_with_distinct_merchants_and_capabilities() {
         let pools = json!({"data":[

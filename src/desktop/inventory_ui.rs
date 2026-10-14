@@ -61,7 +61,10 @@ impl App {
             [260, 244, -312, 24],
             2,
         )?;
-        self.table(MODELS, &[("模型 ID", 330), ("供应商", 148), ("接口", 244)])?;
+        self.table(
+            MODELS,
+            &[("模型 ID", 330), ("模型提供商", 148), ("接口", 244)],
+        )?;
         let empty = self.add(
             MODELS_EMPTY,
             w!("STATIC"),
@@ -97,7 +100,7 @@ impl App {
                 ("商户", 120),
                 ("价格倍率", 104),
                 ("账号数量", 84),
-                ("供应商", 152),
+                ("模型提供商", 152),
                 ("状态", 124),
             ],
         )?;
@@ -113,7 +116,7 @@ impl App {
             ACCOUNTS,
             &[
                 ("账号", 268),
-                ("供应商", 160),
+                ("模型提供商", 160),
                 ("状态", 96),
                 ("模型目录", 112),
                 ("模型数", 88),
@@ -644,7 +647,7 @@ mod tests {
                         Secrets::default(),
                     )))
                     .unwrap();
-                let models = serde_json::json!({"data":[{"id":"alpha","router_pools":["pool-a"]},{"id":"beta","router_pools":["pool-a","pool-b"]}]});
+                let models = serde_json::json!({"data":[{"id":"chatgpt/alpha","router_provider":"openai","router_model":"alpha","router_pools":["pool-a"]},{"id":"chatgpt/beta","router_provider":"openai","router_model":"beta","router_pools":["pool-a","pool-b"]}]});
                 let mut pools = serde_json::json!({"data":[
                     {"id":"pool-a","accounts":[{"id":"account-a","enabled":true,"available":true},{"id":"account-b","enabled":false,"available":false}]},
                     {"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":false}]},
@@ -697,9 +700,9 @@ mod tests {
                     SendMessageW(state.by_id[&MODELS], LVM_GETITEMCOUNT, 0, 0),
                     1
                 );
-                assert_eq!(state.catalog.models[state.model_rows[0]].id, "beta");
+                assert_eq!(state.catalog.models[state.model_rows[0]].id, "chatgpt/beta");
                 let index = state.model_rows[0];
-                assert_eq!(state.use_model(index).unwrap(), "beta");
+                assert_eq!(state.use_model(index).unwrap(), "chatgpt/beta");
                 assert!(!settings::load(&state.path).unwrap().0.routing.automatic);
                 assert_eq!(
                     settings::load(&state.path)
@@ -775,12 +778,12 @@ mod tests {
                 SendMessageW(state.by_id[&MODEL_POOL], CB_SETCURSEL, 1, 0);
                 state.inventory_action(MODEL_POOL).unwrap();
                 let index = state.model_rows[0];
-                assert_eq!(state.use_model(index).unwrap(), "beta");
+                assert_eq!(state.use_model(index).unwrap(), "chatgpt/beta");
                 state.account_pool_id = Some("pool-a".into());
                 state.inventory_action(USE_POOL).unwrap();
                 assert_eq!(proxy.routing_rules().pool.as_deref(), Some("pool-a"));
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
-                assert_eq!(state.use_model(index).unwrap(), "beta");
+                assert_eq!(state.use_model(index).unwrap(), "chatgpt/beta");
                 state.task.take().unwrap().abort();
                 state.running = false;
                 state.live_proxy = None;
@@ -826,7 +829,7 @@ mod tests {
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
                 state.replace_catalog(
                     catalog::parse(
-                        &serde_json::json!({"data":[{"id":"beta","router_pools":["pool-b"]}]}),
+                        &serde_json::json!({"data":[{"id":"chatgpt/beta","router_provider":"openai","router_model":"beta","router_pools":["pool-b"]}]}),
                         &serde_json::json!({"data":[{"id":"pool-b","accounts":[]}]}),
                     )
                     .unwrap(),
