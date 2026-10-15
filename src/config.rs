@@ -21,6 +21,8 @@ pub struct Config {
     pub max_in_flight: usize,
     #[serde(default = "connections")]
     pub max_connections: usize,
+    #[serde(default = "response_header_seconds")]
+    pub response_header_timeout_secs: u64,
     #[serde(default = "idle_seconds")]
     pub stream_idle_secs: u64,
 }
@@ -33,6 +35,9 @@ fn connections() -> usize {
 }
 fn idle_seconds() -> u64 {
     120
+}
+pub(crate) fn response_header_seconds() -> u64 {
+    300
 }
 
 impl Config {
@@ -68,6 +73,7 @@ impl Config {
         ensure!(
             (1..=128).contains(&self.max_in_flight)
                 && (1..=1024).contains(&self.max_connections)
+                && (1..=3600).contains(&self.response_header_timeout_secs)
                 && (1..=3600).contains(&self.stream_idle_secs),
             "Invalid resource limits"
         );

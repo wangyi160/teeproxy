@@ -71,6 +71,7 @@ impl Profile {
             routing: self.routing.clone(),
             max_in_flight: 16,
             max_connections: 128,
+            response_header_timeout_secs: crate::config::response_header_seconds(),
             stream_idle_secs: 120,
         };
         config.validate()?;

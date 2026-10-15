@@ -72,7 +72,7 @@ agent 的占位 key 会被移除。真实 router key 由 teeproxy 管理，agent
 - 响应状态和数据逐块转发，支持 SSE；取消、错误或超时关闭对应上游连接。已发出的请求不会自动重放。
 - 仅监听本机回环地址，核对 Host 和端口，拒绝浏览器跨域请求、CONNECT、代理形式的目标 URL、管理接口和 URL 凭证。
 - 支持模型/账号池/用量查询、Chat Completions、Responses、Messages 以及经验证的 router 健康查询。其他生成协议无法校验报价，拒绝转发。
-- 请求体及 gzip 解压后均限制为 2 MiB，默认 16 个并发请求和 128 个客户端连接，流空闲超时默认 120 秒。
+- 请求体及 gzip 解压后均限制为 2 MiB，默认 16 个并发请求和 128 个客户端连接。生成请求等待首个响应默认 300 秒，命令行配置项为 `response_header_timeout_secs`（1–3600 秒）；流空闲超时独立计算，默认 120 秒。等待响应超时返回 HTTP 504 / `router_response_timeout_request_not_replayed`，运行记录显示原因；已发送的请求不会自动重发。Router 和模型上游仍有各自的超时限制。
 
 当前不支持 WebSocket、远程 compaction、Claude token-counting 接口或协议转换。agent 的具体功能取决于 router 提供的接口与模型；不会伪造未实现接口的成功响应。部署和本机信任边界见 [安全说明](docs/SECURITY.md)。
 

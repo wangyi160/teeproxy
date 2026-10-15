@@ -102,6 +102,17 @@ impl std::fmt::Display for ConnectionFailure {
 
 impl std::error::Error for ConnectionFailure {}
 
+#[derive(Debug)]
+pub(crate) struct ResponseHeaderTimeout;
+
+impl std::fmt::Display for ResponseHeaderTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Timed out waiting for router response headers")
+    }
+}
+
+impl std::error::Error for ResponseHeaderTimeout {}
+
 impl VerifiedSession {
     /// Capability negotiation is cached only for this exact attested TLS session.
     pub(crate) async fn require_routing_v1(&mut self) -> Result<()> {
@@ -191,11 +202,26 @@ impl VerifiedSession {
         &mut self,
         request: Request<Full<Bytes>>,
     ) -> Result<Response<Incoming>> {
+        let seconds = if request.method() == hyper::Method::POST {
+            crate::config::response_header_seconds()
+        } else {
+            90
+        };
+        self.send_request_with_timeout(request, Duration::from_secs(seconds))
+            .await
+    }
+
+    pub(crate) async fn send_request_with_timeout(
+        &mut self,
+        request: Request<Full<Bytes>>,
+        response_timeout: Duration,
+    ) -> Result<Response<Incoming>> {
         ensure!(
             allowed_api(request.method().as_str(), request.uri().path()),
             "Unsupported router API"
         );
-        self.send_verified(request, MAX_BODY).await
+        self.send_verified(request, MAX_BODY, response_timeout)
+            .await
     }
 
     /// Private merchant transport only; the public loopback gateway never calls this.
@@ -219,13 +245,15 @@ impl VerifiedSession {
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Full::new(Bytes::from(body)))?;
-        self.send_verified(request, 16 * 1024 * 1024).await
+        self.send_verified(request, 16 * 1024 * 1024, Duration::from_secs(90))
+            .await
     }
 
     async fn send_verified(
         &mut self,
         mut request: Request<Full<Bytes>>,
         limit: usize,
+        response_timeout: Duration,
     ) -> Result<Response<Incoming>> {
         use hyper::body::Body;
         ensure!(
@@ -259,11 +287,11 @@ impl VerifiedSession {
             .into());
         }
         timeout(
-            Duration::from_secs(90),
+            response_timeout,
             self.transport.sender.send_request(request),
         )
         .await
-        .context("等待 router 响应超时")
+        .map_err(|_| anyhow::Error::new(ResponseHeaderTimeout))
         .and_then(|result| result.context("TLS 连接中断"))
         .map_err(|error| {
             error.context(ConnectionFailure {
@@ -528,6 +556,41 @@ mod reconnect_tests {
             },
             peer,
         )
+    }
+
+    #[tokio::test]
+    async fn generation_can_wait_past_the_previous_ninety_second_limit() {
+        let (mut session, mut peer) = transport_fixture().await;
+        let request = tokio::spawn(async move {
+            let response = session
+                .send("POST", "/v1/chat/completions", "test-only-key", "{}".into())
+                .await;
+            (session, response)
+        });
+        let mut received = Vec::new();
+        let mut buf = [0; 1024];
+        while !received.ends_with(b"{}") {
+            let n = peer.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            received.extend_from_slice(&buf[..n]);
+        }
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(91)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !request.is_finished(),
+            "A slow first response must not be cut off at 90s"
+        );
+        tokio::time::resume();
+        peer.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+            .await
+            .unwrap();
+        let (_session, response) = request.await.unwrap();
+        assert_eq!(response.unwrap().status(), 200);
+        assert_eq!(
+            received.windows(5).filter(|part| *part == b"POST ").count(),
+            1
+        );
     }
 
     #[tokio::test]

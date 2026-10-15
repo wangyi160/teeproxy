@@ -1154,6 +1154,47 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
 }
 
 #[tokio::test]
+async fn header_timeout_is_explicit_and_never_replays_the_generation() {
+    let upstream = upstream("teeproxy-unit-test", "live-update").await;
+    let mut config = config(&upstream);
+    config.response_header_timeout_secs = 1;
+    let proxy = proxy(config, true, None).await;
+    let agent = agent();
+    let response = agent
+        .post(format!("{}/v1/responses", proxy.url))
+        .body(r#"{"model":"model-a","input":"hold"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 504);
+    let error: serde_json::Value = response.json().await.unwrap();
+    assert_eq!(
+        error["error"]["code"],
+        "router_response_timeout_request_not_replayed"
+    );
+    assert_eq!(
+        upstream
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.path == "/v1/responses")
+            .count(),
+        1
+    );
+
+    // The timed-out TLS session is discarded and its local concurrency permit freed.
+    let response = agent
+        .post(format!("{}/v1/responses", proxy.url))
+        .body(r#"{"model":"model-a","input":"next"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
 async fn idle_stream_timeout_closes_channel_and_releases_capacity() {
     let upstream = upstream("teeproxy-unit-test", "stall").await;
     let mut config = config(&upstream);

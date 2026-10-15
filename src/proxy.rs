@@ -348,10 +348,30 @@ impl Proxy {
         if let Some(rule) = rule {
             request.headers_mut().insert("x-router-routing", rule);
         }
-        let response = match session.send_request(request).await {
+        let response_timeout = Duration::from_secs(if generation {
+            self.config.response_header_timeout_secs
+        } else {
+            90
+        });
+        let response = match session
+            .send_request_with_timeout(request, response_timeout)
+            .await
+        {
             Ok(response) => response,
             // Never retry a request once its send has started.
-            Err(_) => {
+            Err(error) => {
+                if error
+                    .downcast_ref::<crate::client::ResponseHeaderTimeout>()
+                    .is_some()
+                {
+                    self.routing.notify(format!(
+                        "等待 Router 首个响应超过 {} 秒；请求已发送，未自动重发。",
+                        response_timeout.as_secs()
+                    ));
+                    return failure(504, "router_response_timeout_request_not_replayed");
+                }
+                self.routing
+                    .notify("Router 连接中断；请求处理结果未知，未自动重发。".into());
                 return failure(502, "router_connection_failed_request_not_replayed");
             }
         };
@@ -584,8 +604,19 @@ fn decode_body(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, u16> {
 }
 
 fn failure(code: u16, kind: &'static str) -> Response<ProxyBody> {
-    let bytes =
-        serde_json::to_vec(&serde_json::json!({"error":{"type":kind,"message":kind}})).unwrap();
+    let message = match kind {
+        "router_response_timeout_request_not_replayed" => {
+            "Timed out waiting for Router response; request was sent and was not replayed"
+        }
+        "router_connection_failed_request_not_replayed" => {
+            "Router connection interrupted; request outcome is unknown and request was not replayed"
+        }
+        _ => kind,
+    };
+    let bytes = serde_json::to_vec(
+        &serde_json::json!({"error":{"type":kind,"code":kind,"message":message}}),
+    )
+    .unwrap();
     let mut response = Response::new(
         Full::new(Bytes::from(bytes))
             .map_err(|never| match never {})

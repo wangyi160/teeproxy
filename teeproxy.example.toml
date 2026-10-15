@@ -10,6 +10,8 @@ tdx_policy = "policy/tdx-deny-all.json"
 # pool = "m_MERCHANT.selected-pool"
 max_in_flight = 16
 max_connections = 128
+# Wait for the first response (including model reasoning), independent of stream idle time.
+response_header_timeout_secs = 300
 stream_idle_secs = 120
 
 # Both modes send routing rules to the attested router (default maximum 1x).
