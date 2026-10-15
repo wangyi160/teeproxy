@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) const NAV_FIRST: u16 = 501;
-pub(super) const NAV_LAST: u16 = 507;
+pub(super) const NAV_LAST: u16 = 506;
 pub(super) const PAGE_TITLE: u16 = 509;
 pub(super) const PAGE_DESCRIPTION: u16 = 510;
 pub(super) const OPEN_SETTINGS: u16 = 511;
@@ -14,19 +14,17 @@ pub(super) const ACCOUNTS_EMPTY: u16 = 516;
 pub(super) const MODEL_COUNT: u16 = 517;
 pub(super) const POOL_COUNT: u16 = 518;
 pub(super) const OVERVIEW: usize = 0;
-pub(super) const MODEL_PAGE: usize = 1;
-pub(super) const ACCOUNT_PAGE: usize = 2;
-pub(super) const SETTINGS_PAGE: usize = 3;
-pub(super) const LOG_PAGE: usize = 4;
-pub(super) const ROUTE_PAGE: usize = 5;
-pub(super) const PRICE_PAGE: usize = 6;
-const PAGES: [(&str, &str); 7] = [
+pub(super) const INVENTORY_PAGE: usize = 1;
+pub(super) const SETTINGS_PAGE: usize = 2;
+pub(super) const LOG_PAGE: usize = 3;
+pub(super) const ROUTE_PAGE: usize = 4;
+pub(super) const PRICE_PAGE: usize = 5;
+const PAGES: [(&str, &str); 6] = [
     ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
     (
-        "模型列表",
-        "先选择账号池，再使用该池的模型；保存选择后新请求立即使用该池。",
+        "账号与模型",
+        "选择上方账号池，下方联动显示账号与模型；点击使用后切换路由。",
     ),
-    ("账号池", "在上方选择账号池，下方查看该池的账号及状态。"),
     ("连接设置", "配置上游 Router 与本地代理服务。"),
     ("运行记录", "查看连接验证、列表刷新和代理运行的详细记录。"),
     ("路由策略", "设置账号池与倍率上限，模型跟随 Agent 请求。"),
@@ -289,16 +287,13 @@ impl App {
     pub(super) unsafe fn update_visibility(&self) {
         for control in &self.controls {
             let visible = match control.id {
-                REFRESH => matches!(
-                    self.page,
-                    MODEL_PAGE | ACCOUNT_PAGE | ROUTE_PAGE | PRICE_PAGE
-                ),
+                REFRESH => matches!(self.page, INVENTORY_PAGE | ROUTE_PAGE | PRICE_PAGE),
                 PRICE_EMPTY => self.page == PRICE_PAGE && self.price_rows.is_empty(),
-                CATALOG_STATUS => matches!(self.page, MODEL_PAGE | ACCOUNT_PAGE),
-                MODELS_EMPTY => self.page == MODEL_PAGE && self.model_rows.is_empty(),
-                POOLS_EMPTY => self.page == ACCOUNT_PAGE && self.catalog.pools.is_empty(),
+                CATALOG_STATUS => self.page == INVENTORY_PAGE,
+                MODELS_EMPTY => self.page == INVENTORY_PAGE && self.model_rows.is_empty(),
+                POOLS_EMPTY => self.page == INVENTORY_PAGE && self.catalog.pools.is_empty(),
                 ACCOUNTS_EMPTY => {
-                    self.page == ACCOUNT_PAGE
+                    self.page == INVENTORY_PAGE
                         && self.account_pool().is_none_or(|p| p.account_count == 0)
                 }
                 _ => control.page.is_none_or(|page| page == self.page),
@@ -334,7 +329,12 @@ impl App {
             if c.rect[0] >= 0 && c.rect[0] < 208 {
                 return rgb(241, 244, 249);
             }
-            if c.page.is_some() && !matches!(c.id, SEARCH | COPY_MODEL | USE_POOL | SAVE | VERIFY) {
+            if c.page.is_some()
+                && !matches!(
+                    c.id,
+                    SEARCH | COPY_MODEL | USE_POOL | POOL_DETAILS | SAVE | VERIFY
+                )
+            {
                 return rgb(255, 255, 255);
             }
         }
@@ -376,8 +376,7 @@ impl App {
                 [244, 496, -280, 116],
             ],
             SETTINGS_PAGE => vec![[244, 120, -280, 316], [244, 448, -280, 204]],
-            MODEL_PAGE => vec![[244, 230, -280, -318]],
-            ACCOUNT_PAGE => vec![[244, 186, -280, 210], [244, 412, -280, -500]],
+            INVENTORY_PAGE => inventory_cards(width, height).to_vec(),
             LOG_PAGE => vec![[244, 128, -280, -184]],
             ROUTE_PAGE => vec![[244, 128, -280, 382], [244, 572, -280, 42]],
             PRICE_PAGE => vec![[244, 174, -280, -258]],
@@ -470,7 +469,7 @@ impl App {
         let mut rect = item.rcItem;
         let flags = if nav {
             let symbols = [
-                "\u{e80f}", "\u{e8a5}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}",
+                "\u{e80f}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}",
             ];
             let mut icon = rect;
             icon.left += self.scale(16);

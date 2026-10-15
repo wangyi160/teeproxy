@@ -452,7 +452,7 @@ impl App {
         let width = client.right * 96 / self.dpi as i32;
         let height = client.bottom * 96 / self.dpi as i32;
         for control in &self.controls {
-            let [x, y, w, h] = control.rect;
+            let [x, y, w, h] = inventory_rect(control.id, width, height).unwrap_or(control.rect);
             MoveWindow(
                 control.hwnd,
                 self.scale(if x < 0 { width + x } else { x }),
@@ -661,9 +661,7 @@ impl App {
                 }));
             }
             REFRESH if self.page == PRICE_PAGE => self.refresh_prices()?,
-            REFRESH | COPY_MODEL | USE_POOL | MODEL_POOL | VIEW_POOL_MODELS => {
-                self.inventory_action(id)?
-            }
+            REFRESH | COPY_MODEL | USE_POOL => self.inventory_action(id)?,
             ROUTE_MODE..=ROUTE_SAVE => self.routing_action(id)?,
             tray::OPEN => tray::restore(self.hwnd),
             tray::TOGGLE => {
@@ -991,11 +989,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                 }
                 if id == ROUTE_MAX && notification == EN_CHANGE as u16 {
                     app.update_route_summary();
-                    return 0;
-                }
-                if id == MODEL_POOL && notification == CBN_SELCHANGE as u16 {
-                    app.set(SEARCH, "");
-                    app.render_catalog();
                     return 0;
                 }
                 if notification == EN_SETFOCUS as u16 || notification == EN_KILLFOCUS as u16 {

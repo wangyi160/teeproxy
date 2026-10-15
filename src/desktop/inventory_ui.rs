@@ -8,20 +8,42 @@ pub(super) const COPY_MODEL: u16 = 305;
 pub(super) const USE_POOL: u16 = 306;
 pub(super) const REFRESH: u16 = 307;
 pub(super) const CATALOG_STATUS: u16 = 308;
-pub(super) const MODEL_POOL: u16 = 309;
 pub(super) const POOL_DETAILS: u16 = 310;
-pub(super) const VIEW_POOL_MODELS: u16 = 311;
 pub(super) const POOLS: u16 = 312;
 pub(super) const POOLS_EMPTY: u16 = 313;
 pub(super) const ACCOUNTS_TITLE: u16 = 314;
 pub(super) const POOLS_TITLE: u16 = 315;
+pub(super) const MODELS_TITLE: u16 = 316;
+
+pub(super) fn inventory_cards(width: i32, height: i32) -> [[i32; 4]; 3] {
+    let left = (width - 296) * 44 / 100;
+    [
+        [244, 186, width - 280, 222],
+        [244, 456, left, height - 544],
+        [260 + left, 456, width - 296 - left, height - 544],
+    ]
+}
+
+pub(super) fn inventory_rect(id: u16, width: i32, height: i32) -> Option<[i32; 4]> {
+    let [_, accounts, models] = inventory_cards(width, height);
+    let card = match id {
+        ACCOUNTS | ACCOUNTS_TITLE | ACCOUNTS_EMPTY => accounts,
+        MODELS | MODELS_TITLE | MODELS_EMPTY => models,
+        _ => return None,
+    };
+    Some(match id {
+        ACCOUNTS_TITLE | MODELS_TITLE => [card[0] + 16, 470, card[2] - 32, 24],
+        ACCOUNTS_EMPTY | MODELS_EMPTY => [card[0] + 24, 556, card[2] - 48, 100],
+        _ => [card[0] + 16, 506, card[2] - 32, height - 610],
+    })
+}
 
 impl App {
     pub(super) unsafe fn scale_inventory_columns(&self) {
         for (id, widths) in [
-            (MODELS, &[330, 148, 244][..]),
+            (MODELS, &[282, 124][..]),
             (POOLS, &[144, 120, 104, 84, 152, 124][..]),
-            (ACCOUNTS, &[268, 160, 96, 112, 88][..]),
+            (ACCOUNTS, &[104, 72, 78, 64][..]),
             (PRICES, &[220, 96, 210, 88, 88, 88][..]),
         ] {
             if let Some(hwnd) = self.by_id.get(&id) {
@@ -37,35 +59,27 @@ impl App {
         }
     }
     pub(super) unsafe fn build_inventory(&mut self) -> Result<()> {
-        self.building_page = Some(MODEL_PAGE);
-        let selector = self.add(
-            MODEL_POOL,
-            w!("COMBOBOX"),
-            "",
-            WS_TABSTOP | WS_VSCROLL | CBS_DROPDOWNLIST as u32,
-            [244, 130, -416, 260],
-            0,
-        )?;
-        SendMessageW(
-            selector,
-            CB_SETCUEBANNER,
-            0,
-            wide("选择账号池").as_ptr() as isize,
-        );
-        self.edit(SEARCH, "", [244, 178, -520, 36], 0, "搜索此池中的模型")?;
-        self.button(COPY_MODEL, "使用此池并复制模型", [-260, 178, 224, 36], 0)?;
+        self.building_page = Some(INVENTORY_PAGE);
+        self.button(USE_POOL, "使用所选账号池", [244, 130, 156, 36], 0)?;
+        self.edit(SEARCH, "", [416, 130, -820, 36], 0, "搜索所选池的模型")?;
+        self.button(COPY_MODEL, "使用此池并复制模型", [-388, 130, 216, 36], 0)?;
         self.add(
             POOL_DETAILS,
             w!("STATIC"),
             "请选择账号池",
             SS_LEFT,
-            [260, 244, -312, 24],
+            [244, 420, -280, 24],
             2,
         )?;
-        self.table(
-            MODELS,
-            &[("模型 ID", 330), ("模型提供商", 148), ("接口", 244)],
+        self.add(
+            MODELS_TITLE,
+            w!("STATIC"),
+            "模型 · 请先选择账号池",
+            SS_LEFT,
+            [260, 470, 300, 24],
+            4,
         )?;
+        self.table(MODELS, &[("模型 ID", 282), ("接口", 124)])?;
         let empty = self.add(
             MODELS_EMPTY,
             w!("STATIC"),
@@ -83,9 +97,6 @@ impl App {
             0,
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
-        self.building_page = Some(ACCOUNT_PAGE);
-        self.button(USE_POOL, "使用所选账号池", [244, 130, 168, 36], 0)?;
-        self.button(VIEW_POOL_MODELS, "查看池内模型", [428, 130, 156, 36], 0)?;
         self.add(
             POOLS_TITLE,
             w!("STATIC"),
@@ -108,19 +119,18 @@ impl App {
         self.add(
             ACCOUNTS_TITLE,
             w!("STATIC"),
-            "账号列表 · 请先选择账号池",
+            "账号 · 请先选择账号池",
             SS_LEFT,
             [260, 426, -312, 24],
-            2,
+            4,
         )?;
         self.table(
             ACCOUNTS,
             &[
-                ("账号", 268),
-                ("模型提供商", 160),
-                ("状态", 96),
-                ("模型目录", 112),
-                ("模型数", 88),
+                ("账号", 104),
+                ("状态", 72),
+                ("模型目录", 78),
+                ("模型数", 64),
             ],
         )?;
         let empty = self.add(
@@ -167,8 +177,7 @@ impl App {
             "",
             WS_TABSTOP | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
             match id {
-                MODELS => [260, 280, -312, -380],
-                POOLS => [260, 234, -312, 152],
+                POOLS => [260, 234, -312, 158],
                 PRICES => [260, 236, -312, -510],
                 _ => [260, 460, -312, -560],
             },
@@ -178,7 +187,7 @@ impl App {
             hwnd,
             LVM_SETEXTENDEDLISTVIEWSTYLE,
             0,
-            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER) as isize,
+            (LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_LABELTIP) as isize,
         );
         SetWindowTheme(hwnd, w!("Explorer"), ptr::null());
         for (index, (label, width)) in columns.iter().enumerate() {
@@ -200,44 +209,17 @@ impl App {
         Ok(())
     }
     pub(super) unsafe fn model_pool(&self) -> Option<&catalog::Pool> {
-        let index = SendMessageW(self.by_id[&MODEL_POOL], CB_GETCURSEL, 0, 0);
-        (index >= 0)
-            .then(|| self.catalog.pools.get(index as usize))
-            .flatten()
+        self.account_pool()
     }
     pub(super) unsafe fn replace_catalog(&mut self, catalog: catalog::Catalog) {
-        let account_preferred = self.account_pool_id.clone().or_else(|| {
-            let id = self.text(POOL);
-            (!id.is_empty()).then_some(id)
-        });
-        let preferred = self.model_pool().map(|p| p.id.clone()).or_else(|| {
+        let preferred = self.account_pool_id.clone().or_else(|| {
             let id = self.text(POOL);
             (!id.is_empty()).then_some(id)
         });
         self.catalog = catalog;
         self.catalog_loaded = true;
-        let selector = self.by_id[&MODEL_POOL];
-        SendMessageW(selector, CB_RESETCONTENT, 0, 0);
-        for pool in &self.catalog.pools {
-            SendMessageW(
-                selector,
-                CB_ADDSTRING,
-                0,
-                wide(&pool.label).as_ptr() as isize,
-            );
-        }
-        let index = if let Some(id) = preferred {
-            // A removed pool must not silently select a different merchant/pool.
-            self.catalog.pools.iter().position(|p| p.id == id)
-        } else {
-            self.catalog
-                .pools
-                .iter()
-                .position(|p| self.catalog.models.iter().any(|m| m.pool == p.id))
-                .or_else(|| (!self.catalog.pools.is_empty()).then_some(0))
-        };
-        SendMessageW(selector, CB_SETCURSEL, index.unwrap_or(usize::MAX), 0);
-        self.render_pools(account_preferred.as_deref());
+        // Preserve by full ID, never silently switch merchants when a pool disappears.
+        self.render_pools(preferred.as_deref());
         self.refresh_route_pools();
         self.render_catalog();
     }
@@ -246,6 +228,28 @@ impl App {
             .pools
             .iter()
             .find(|p| Some(&p.id) == self.account_pool_id.as_ref())
+    }
+    fn pool_providers(&self, pool: &catalog::Pool) -> String {
+        if !pool.provider.is_empty() {
+            return pool.provider.clone();
+        }
+        self.catalog
+            .models
+            .iter()
+            .filter(|m| m.pool == pool.id)
+            .map(|m| m.provider.as_str())
+            .chain(
+                self.catalog
+                    .accounts
+                    .iter()
+                    .filter(|a| a.pool == pool.id)
+                    .map(|a| a.provider.as_str()),
+            )
+            .filter(|p| !p.is_empty())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(" / ")
     }
     unsafe fn render_pools(&mut self, preferred: Option<&str>) {
         let rows = self
@@ -303,7 +307,8 @@ impl App {
             .and_then(|i| self.catalog.pools.get(i))
             .map(|p| p.id.clone());
         self.render_accounts();
-        self.update_visibility();
+        self.set(SEARCH, "");
+        self.render_catalog();
     }
     unsafe fn render_accounts(&self) {
         let accounts = self
@@ -314,7 +319,6 @@ impl App {
             .map(|a| {
                 vec![
                     a.id.as_str(),
-                    a.provider.as_str(),
                     a.state.as_str(),
                     a.catalog.as_str(),
                     a.models.as_str(),
@@ -325,12 +329,9 @@ impl App {
         self.set(
             ACCOUNTS_TITLE,
             &if let Some(pool) = self.account_pool() {
-                format!(
-                    "账号列表 · {} · {} · {} 个账号",
-                    pool.name, pool.merchant, pool.account_count
-                )
+                format!("账号 · {} 个", pool.account_count)
             } else {
-                "账号列表 · 请先选择账号池".into()
+                "账号 · 请先选择账号池".into()
             },
         );
         self.set(
@@ -360,11 +361,7 @@ impl App {
             .iter()
             .map(|index| {
                 let row = &self.catalog.models[*index];
-                vec![
-                    row.id.as_str(),
-                    row.provider.as_str(),
-                    row.protocols.as_str(),
-                ]
+                vec![row.id.as_str(), row.protocols.as_str()]
             })
             .collect::<Vec<_>>();
         fill(self.by_id[&MODELS], &models);
@@ -374,7 +371,7 @@ impl App {
                 if let Some(pool) = self.model_pool() {
                     if filter.is_empty() {
                         format!(
-                            "此账号池暂无可见模型\r\n\r\n{} · {}。可在账号池页查看账号状态。",
+                            "此账号池暂无可见模型\r\n\r\n{} · {}。请查看左侧账号状态。",
                             pool.name, pool.state
                         )
                     } else {
@@ -388,12 +385,17 @@ impl App {
             },
         );
         self.set(
+            MODELS_TITLE,
+            &format!("模型 · {} 个", self.model_rows.len()),
+        );
+        self.set(
             POOL_DETAILS,
             &if let Some(pool) = self.model_pool() {
                 format!(
-                    "{} · {} · 倍率 {} · {} · {} / {} 个模型",
+                    "{} · {} · {} · 倍率 {} · {} · {} / {} 个模型",
+                    pool.name,
                     pool.merchant,
-                    pool.provider,
+                    self.pool_providers(pool),
                     pool.multiplier,
                     pool.state,
                     self.model_rows.len(),
@@ -413,7 +415,6 @@ impl App {
     pub(super) unsafe fn invalidate_catalog(&mut self) {
         self.catalog = Default::default();
         self.catalog_loaded = false;
-        SendMessageW(self.by_id[&MODEL_POOL], CB_RESETCONTENT, 0, 0);
         self.render_pools(None);
         self.refresh_route_pools();
         self.render_catalog();
@@ -498,23 +499,6 @@ impl App {
                 self.set(CATALOG_STATUS, &message);
                 self.append(&message);
             }
-            MODEL_POOL => {
-                self.set(SEARCH, "");
-                self.render_catalog();
-            }
-            VIEW_POOL_MODELS => {
-                let pool = self.account_pool().context("请先选择一个账号池")?;
-                let index = self
-                    .catalog
-                    .pools
-                    .iter()
-                    .position(|p| p.id == pool.id)
-                    .context("请刷新账号池")?;
-                SendMessageW(self.by_id[&MODEL_POOL], CB_SETCURSEL, index, 0);
-                self.set(SEARCH, "");
-                self.render_catalog();
-                self.select_page(MODEL_PAGE);
-            }
             USE_POOL => {
                 let pool = self
                     .account_pool()
@@ -522,15 +506,16 @@ impl App {
                     .id
                     .clone();
                 self.select_inventory_pool(&pool)?;
-                self.append(&format!(
+                let message = format!(
                     "已保存账号池 {pool}；{}。",
                     if self.running {
                         "新请求立即生效"
                     } else {
                         "下次启动生效"
                     }
-                ));
-                self.select_page(ROUTE_PAGE);
+                );
+                self.append(&message);
+                self.set(CATALOG_STATUS, &message);
             }
             _ => {}
         }
@@ -579,6 +564,21 @@ pub(super) unsafe fn fill<T: AsRef<str>>(hwnd: HWND, rows: &[Vec<T>]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    unsafe fn choose_pool(state: &mut App, index: usize) {
+        let selection = LVITEMW {
+            state: LVIS_SELECTED | LVIS_FOCUSED,
+            stateMask: LVIS_SELECTED | LVIS_FOCUSED,
+            ..mem::zeroed()
+        };
+        SendMessageW(
+            state.by_id[&POOLS],
+            LVM_SETITEMSTATE,
+            index,
+            (&selection as *const LVITEMW) as isize,
+        );
+        state.pool_selection_changed();
+    }
 
     unsafe fn cell_text(hwnd: HWND, row: usize, column: i32) -> String {
         let mut buffer = [0u16; 256];
@@ -707,7 +707,7 @@ mod tests {
                 state.refresh_fonts();
                 assert_eq!(
                     SendMessageW(state.by_id[&MODELS], LVM_GETCOLUMNWIDTH, 0, 0),
-                    495
+                    423
                 );
                 state.dpi = 96;
                 state.refresh_fonts();
@@ -728,7 +728,7 @@ mod tests {
                     1
                 );
                 assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 0), "account-b");
-                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 2), "暂不可用");
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 1), "暂不可用");
                 state.set(SEARCH, "BETA");
                 state.render_catalog();
                 assert_eq!(
@@ -797,8 +797,7 @@ mod tests {
                     settings::load(&state.path).unwrap().0.routing,
                     proxy.routing_rules().policy
                 );
-                SendMessageW(state.by_id[&MODEL_POOL], CB_SETCURSEL, 0, 0);
-                state.inventory_action(MODEL_POOL).unwrap();
+                choose_pool(&mut state, 0);
                 assert_eq!(state.model_rows.len(), 2);
                 let index = state.model_rows[0];
                 state.use_model(index).unwrap();
@@ -810,14 +809,12 @@ mod tests {
                     proxy.routing_rules().policy.max_multiplier_millionths,
                     200000
                 );
-                SendMessageW(state.by_id[&MODEL_POOL], CB_SETCURSEL, 1, 0);
-                state.inventory_action(MODEL_POOL).unwrap();
+                choose_pool(&mut state, 1);
                 let index = state.model_rows[0];
                 assert_eq!(state.use_model(index).unwrap(), "chatgpt/beta");
-                state.account_pool_id = Some("pool-a".into());
                 state.inventory_action(USE_POOL).unwrap();
-                assert_eq!(proxy.routing_rules().pool.as_deref(), Some("pool-a"));
-                assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
+                assert_eq!(proxy.routing_rules().pool.as_deref(), Some("pool-b"));
+                assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 assert_eq!(state.use_model(index).unwrap(), "chatgpt/beta");
                 state.task.take().unwrap().abort();
                 state.running = false;
@@ -843,8 +840,13 @@ mod tests {
                     2
                 );
                 assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 0), "account-a");
-                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 1, 2), "已停用");
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 1, 1), "已停用");
+                assert_eq!(state.model_pool().unwrap().id, "pool-a");
+                assert_eq!(state.model_rows.len(), 2);
+                assert!(state.text(SEARCH).is_empty());
+                // Viewing a different pool never changes the saved routing rule.
                 assert_eq!(state.text(POOL), "pool-b");
+                assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 // Refresh may reorder rows; preserve the selected pool by full ID.
                 pools["data"][0]["pool_name"] = serde_json::json!("second");
                 pools["data"][1]["pool_name"] = serde_json::json!("first");
@@ -855,12 +857,17 @@ mod tests {
                     SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
                     2
                 );
-                state.inventory_action(VIEW_POOL_MODELS).unwrap();
-                assert_eq!(state.page, MODEL_PAGE);
+                state.select_page(INVENTORY_PAGE);
+                for id in [POOLS, ACCOUNTS, MODELS] {
+                    assert_ne!(
+                        GetWindowLongPtrW(state.by_id[&id], GWL_STYLE) & WS_VISIBLE as isize,
+                        0
+                    );
+                }
                 assert_eq!(state.model_pool().unwrap().id, "pool-a");
                 state.inventory_action(USE_POOL).unwrap();
                 assert_eq!(state.text(POOL), "pool-a");
-                assert_eq!(state.page, ROUTE_PAGE);
+                assert_eq!(state.page, INVENTORY_PAGE);
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
                 state.replace_catalog(
                     catalog::parse(
