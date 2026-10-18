@@ -102,15 +102,22 @@ try {
     Set-Control 101 'https://127.0.0.1:1'
     Set-Control 102 'desktop-smoke-key-not-a-real-credential'
     Set-Control 103 $testPort
+    if ((Read-Control 111) -ne '127.0.0.1') { throw 'Default listener is not loopback' }
+    Set-Control 111 '0.0.0.0'
     Set-Control 104 'test-pool'
     Set-Control 105 $policyFile
+    Click-Control 201
+    if (Test-Path -LiteralPath $settingsFile) { throw 'Wildcard settings saved without client authentication' }
+    Set-Control 107 'desktop-local-client-key-for-test'
     Click-Control 201
     Wait-Until { Test-Path -LiteralPath $settingsFile }
     $saved = [IO.File]::ReadAllText($settingsFile)
     if ($saved.Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key persisted in plaintext' }
+    if ($saved.Contains('desktop-local-client-key-for-test')) { throw 'Local key persisted in plaintext' }
     Close-TestWindow
     Open-TestWindow
     if ((Read-Control 101) -ne 'https://127.0.0.1:1' -or (Read-Control 103) -ne "$testPort") { throw 'Saved address/port did not restore' }
+    if ((Read-Control 111) -ne '0.0.0.0') { throw 'Saved bind IP did not restore' }
     # Password controls are masked, including after reopening.
     if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,102),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -eq [IntPtr]::Zero) { throw 'Key control is not masked' }
     Click-Control 202
@@ -150,8 +157,23 @@ try {
     $client = [Net.Http.HttpClient]::new($handler)
     try {
         $response = $client.GetAsync("http://127.0.0.1:$testPort/v1/models").GetAwaiter().GetResult()
+        if ([int]$response.StatusCode -ne 401) { throw 'Wildcard listener accepted missing client key' }
+        $response.Dispose()
+        $client.DefaultRequestHeaders.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer','desktop-local-client-key-for-test')
+        $response = $client.GetAsync("http://127.0.0.1:$testPort/v1/models").GetAwaiter().GetResult()
         if ([int]$response.StatusCode -ne 502) { throw 'Unverified upstream accepted' }
         $response.Dispose()
+        $localNetworkIP = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notmatch '^(127\.|169\.254\.|198\.18\.)' } | Select-Object -First 1 -ExpandProperty IPAddress
+        if ($localNetworkIP) {
+            $response = $client.GetAsync("http://${localNetworkIP}:$testPort/v1/models").GetAwaiter().GetResult()
+            if ([int]$response.StatusCode -ne 502) { throw 'Authenticated network client did not reach the TEE check' }
+            $response.Dispose()
+            $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,"http://${localNetworkIP}:$testPort/v1/models")
+            $request.Headers.Host = "localhost:$testPort"
+            $response = $client.SendAsync($request).GetAwaiter().GetResult()
+            if ([int]$response.StatusCode -ne 400) { throw 'Network listener accepted a mismatched localhost Host' }
+            $response.Dispose();$request.Dispose()
+        }
     } finally { $client.Dispose(); $handler.Dispose() }
     Click-Control 203
     Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,202)) }

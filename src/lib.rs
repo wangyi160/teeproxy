@@ -1,4 +1,4 @@
-//! A loopback API gateway that sends business data only on attested TLS sessions.
+//! An API gateway that sends business data only on attested TLS sessions.
 pub mod client;
 pub mod config;
 #[cfg(windows)]

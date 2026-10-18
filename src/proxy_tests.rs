@@ -179,13 +179,16 @@ fn config(upstream: &Upstream) -> Config {
 
 async fn proxy(mut config: Config, allow_test: bool, auth: Option<&str>) -> Running {
     config.client_key_env = auth.map(|_| "TEST_CLIENT_KEY".into());
+    let listen = config.listen;
     let trust = Trust {
         allow_test_evidence: allow_test,
         ..Trust::default()
     };
     let proxy = Proxy::new(config, trust, "router-key-not-provider-key", auth).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
+    let listener = TcpListener::bind(listen).await.unwrap();
+    let url = crate::config::local_api_url(listener.local_addr().unwrap())
+        .trim_end_matches("/v1")
+        .to_owned();
     let task = tokio::spawn(async move {
         proxy.serve(listener).await.unwrap();
     });
@@ -886,6 +889,28 @@ fn config_and_policy_fail_closed() {
     assert!(config.trust().is_err());
     config.listen = "0.0.0.0:8899".parse().unwrap();
     assert!(config.validate().is_err());
+    config.client_key_env = Some("".into());
+    assert!(config.validate().is_err());
+    config.client_key_env = Some("LOCAL_KEY".into());
+    for address in [
+        "0.0.0.0:8899",
+        "192.168.1.6:8899",
+        "[::]:8899",
+        "[::1]:8899",
+    ] {
+        config.listen = address.parse().unwrap();
+        config.validate().unwrap();
+        assert!(Proxy::new(config.clone(), Trust::default(), "test-router-key", None).is_err());
+        assert!(
+            Proxy::new(
+                config.clone(),
+                Trust::default(),
+                "test-router-key",
+                Some("")
+            )
+            .is_err()
+        );
+    }
     config.listen = "127.0.0.1:8899".parse().unwrap();
     config.router = "http://router.invalid".into();
     assert!(config.validate().is_err());
@@ -897,6 +922,71 @@ fn config_and_policy_fail_closed() {
         )
         .is_err()
     );
+}
+
+#[tokio::test]
+async fn wildcard_listener_requires_auth_and_checks_the_accepted_socket_host() {
+    for bind in ["0.0.0.0:0", "[::]:0"] {
+        let upstream = upstream("teeproxy-unit-test", "json").await;
+        let mut config = config(&upstream);
+        config.listen = bind.parse().unwrap();
+        let token = "wildcard-local-client-key";
+        let proxy = proxy(config, true, Some(token)).await;
+        let agent = agent();
+        let url = format!("{}/v1/models", proxy.url);
+        for request in [agent.get(&url), agent.get(&url).bearer_auth("wrong-key")] {
+            assert_eq!(request.send().await.unwrap().status(), 401);
+        }
+        let port = reqwest::Url::parse(&url).unwrap().port().unwrap();
+        for host in [
+            format!("0.0.0.0:{port}"),
+            format!("[::]:{port}"),
+            format!("attacker.invalid:{port}"),
+        ] {
+            assert_eq!(
+                agent
+                    .get(&url)
+                    .bearer_auth(token)
+                    .header("host", host)
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                400
+            );
+        }
+        assert_eq!(
+            agent
+                .get(&url)
+                .bearer_auth(token)
+                .header("origin", "https://attacker.invalid")
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            403
+        );
+        assert_eq!(upstream.attestations.load(Ordering::SeqCst), 0);
+        assert!(upstream.calls.lock().unwrap().is_empty());
+        let response = agent.get(&url).bearer_auth(token).send().await.unwrap();
+        assert_eq!(response.status(), 201);
+        response.bytes().await.unwrap();
+        let calls = upstream.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].headers["authorization"],
+            "Bearer router-key-not-provider-key"
+        );
+    }
+}
+
+#[tokio::test]
+async fn serving_a_different_listener_cannot_bypass_configured_bind_restrictions() {
+    let upstream = upstream("teeproxy-unit-test", "json").await;
+    let proxy = Proxy::new(config(&upstream), Trust::default(), "router-key", None).unwrap();
+    let listener = TcpListener::bind("0.0.0.0:0").await.unwrap();
+    assert!(proxy.serve(listener).await.is_err());
+    assert_eq!(upstream.attestations.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

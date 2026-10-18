@@ -19,6 +19,7 @@ use zeroize::{Zeroize, Zeroizing};
 #[serde(default, deny_unknown_fields)]
 pub struct Profile {
     pub router: String,
+    pub listen_ip: String,
     pub port: u16,
     pub tdx_policy: String,
     pub snp_policy: String,
@@ -29,6 +30,7 @@ impl Default for Profile {
     fn default() -> Self {
         Self {
             router: String::new(),
+            listen_ip: "127.0.0.1".into(),
             port: 8899,
             tdx_policy: String::new(),
             snp_policy: String::new(),
@@ -59,9 +61,24 @@ struct Saved {
 impl Profile {
     pub fn config(&self, secrets: &Secrets, directory: &Path) -> Result<Config> {
         ensure!(self.port != 0, "本地端口必须介于 1 和 65535 之间");
+        let ip: std::net::IpAddr = self
+            .listen_ip
+            .trim()
+            .parse()
+            .context("监听 IP 必须是有效的 IPv4 或 IPv6 地址")?;
+        ensure!(
+            ip.is_loopback() || !secrets.client_key.is_empty(),
+            "监听局域网或所有网卡时，请设置本地密钥"
+        );
+        ensure!(
+            secrets.client_key.is_empty()
+                || (16..=256).contains(&secrets.client_key.len())
+                    && secrets.client_key.bytes().all(|c| c.is_ascii_graphic()),
+            "本地密钥须为 16–256 个可见 ASCII 字符"
+        );
         let policy = |value: &str| (!value.trim().is_empty()).then(|| directory.join(value.trim()));
         let config = Config {
-            listen: ([127, 0, 0, 1], self.port).into(),
+            listen: (ip, self.port).into(),
             router: self.router.trim().to_owned(),
             router_key_env: "TEEPROXY_ROUTER_KEY".into(),
             tdx_policy: policy(&self.tdx_policy),
@@ -211,6 +228,7 @@ mod tests {
         let path = dir.join("desktop.json");
         let profile = Profile {
             router: "https://router.invalid:8443".into(),
+            listen_ip: "0.0.0.0".into(),
             tdx_policy: "approved.json".into(),
             ..Profile::default()
         };
@@ -223,6 +241,15 @@ mod tests {
         assert!(!text.contains(&secrets.router_key) && !text.contains(&secrets.client_key));
         let (loaded, keys) = load(&path).unwrap();
         assert_eq!(loaded.router, profile.router);
+        assert_eq!(loaded.listen_ip, "0.0.0.0");
+        assert!(
+            loaded
+                .config(&keys, &dir)
+                .unwrap()
+                .listen
+                .ip()
+                .is_unspecified()
+        );
         assert_eq!(keys.router_key, secrets.router_key);
         assert_eq!(
             loaded.config(&keys, &dir).unwrap().tdx_policy.unwrap(),
@@ -232,5 +259,41 @@ mod tests {
         assert!(load(&path).is_err());
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_profiles_remain_local_and_network_binds_require_a_valid_key() {
+        let mut profile: Profile =
+            serde_json::from_str(r#"{"router":"https://router.invalid","port":8899}"#).unwrap();
+        let mut secrets = Secrets::default();
+        assert_eq!(profile.listen_ip, "127.0.0.1");
+        assert_eq!(
+            crate::config::local_api_url(profile.config(&secrets, Path::new(".")).unwrap().listen),
+            "http://127.0.0.1:8899/v1"
+        );
+        for ip in ["0.0.0.0", "192.168.1.6", "::"] {
+            profile.listen_ip = ip.into();
+            secrets.client_key.clear();
+            assert!(profile.config(&secrets, Path::new(".")).is_err());
+            secrets.client_key = "too-short".into();
+            assert!(profile.config(&secrets, Path::new(".")).is_err());
+            secrets.client_key = "test-local-client-key".into();
+            profile.config(&secrets, Path::new(".")).unwrap();
+        }
+        profile.listen_ip = "::1".into();
+        secrets.client_key.clear();
+        assert_eq!(
+            crate::config::local_api_url(profile.config(&secrets, Path::new(".")).unwrap().listen),
+            "http://[::1]:8899/v1"
+        );
+        for ip in [
+            "localhost",
+            "127.0.0.1:8899",
+            "http://192.168.1.6",
+            "invalid",
+        ] {
+            profile.listen_ip = ip.into();
+            assert!(profile.config(&secrets, Path::new(".")).is_err());
+        }
     }
 }

@@ -117,8 +117,9 @@ async fn execute() -> Result<()> {
         .await
         .context("Cannot bind local proxy")?;
     eprintln!(
-        "teeproxy listening on http://{}; attestation required for every upstream session",
-        listener.local_addr()?
+        "teeproxy listening on http://{}; local API {}; attestation required for every upstream session",
+        listener.local_addr()?,
+        teeproxy::config::local_api_url(listener.local_addr()?)
     );
     tokio::select! {
         result = proxy.serve(listener) => result?,

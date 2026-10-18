@@ -104,7 +104,12 @@ impl App {
         self.label("本地接入地址", [268, 150, 360, 26], 3)?;
         self.edit(
             URL,
-            &format!("http://127.0.0.1:{}/v1", profile.port),
+            &profile
+                .listen_ip
+                .trim()
+                .parse::<std::net::IpAddr>()
+                .map(|ip| crate::config::local_api_url((ip, profile.port).into()))
+                .unwrap_or_default(),
             [268, 198, -460, 40],
             ES_READONLY as u32,
             "",
@@ -202,21 +207,21 @@ impl App {
         )?;
 
         self.label("本地服务", [268, 468, 400, 26], 3)?;
-        self.label("监听端口", [268, 520, 132, 24], 0)?;
+        self.label("监听 IP", [268, 520, 132, 24], 0)?;
+        self.edit(
+            LISTEN_IP,
+            &profile.listen_ip,
+            [412, 511, -664, 38],
+            0,
+            "127.0.0.1 或 0.0.0.0",
+        )?;
+        self.label("端口", [-236, 520, 64, 24], 0)?;
         self.edit(
             PORT,
             &profile.port.to_string(),
-            [412, 511, 110, 38],
+            [-156, 511, 96, 38],
             ES_NUMBER as u32,
             "8899",
-        )?;
-        self.label("账号池", [546, 520, 72, 24], 0)?;
-        self.edit(
-            POOL,
-            &profile.pool,
-            [624, 511, -684, 38],
-            ES_READONLY as u32,
-            "在路由策略页选择",
         )?;
         self.label("本地密钥", [268, 574, 132, 24], 0)?;
         self.edit(
@@ -224,11 +229,15 @@ impl App {
             &secrets.client_key,
             [412, 565, -472, 38],
             ES_PASSWORD as u32,
-            "可选；设置后同时填入 Agent",
+            "局域网访问必填；同时填入 Agent",
         )?;
-        self.label(
-            "密钥使用当前 Windows 用户加密保存。",
-            [268, 623, -316, 22],
+        self.label("账号池", [268, 623, 132, 22], 0)?;
+        self.add(
+            POOL,
+            w!("STATIC"),
+            &profile.pool,
+            SS_LEFT,
+            [412, 623, -472, 22],
             2,
         )?;
         self.button(SAVE, "保存设置", [244, 674, 132, 38], 0)?;

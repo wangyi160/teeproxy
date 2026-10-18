@@ -46,6 +46,7 @@ const CLIENT_KEY: u16 = 107;
 const URL: u16 = 108;
 const STATUS: u16 = 109;
 const LOG: u16 = 110;
+const LISTEN_IP: u16 = 111;
 const SAVE: u16 = 201;
 const VERIFY: u16 = 202;
 const START: u16 = 203;
@@ -53,8 +54,8 @@ const COPY: u16 = 205;
 const BROWSE_TDX: u16 = 206;
 const BROWSE_SNP: u16 = 207;
 const SHOW_KEYS: u16 = 208;
-const FIELDS: [u16; 10] = [
-    ROUTER, ROUTER_KEY, PORT, POOL, TDX, SNP, CLIENT_KEY, BROWSE_TDX, BROWSE_SNP, SAVE,
+const FIELDS: [u16; 11] = [
+    ROUTER, ROUTER_KEY, LISTEN_IP, PORT, POOL, TDX, SNP, CLIENT_KEY, BROWSE_TDX, BROWSE_SNP, SAVE,
 ];
 
 enum Event {
@@ -310,6 +311,8 @@ impl App {
                 8192
             } else if id == PORT {
                 5
+            } else if id == LISTEN_IP {
+                45
             } else if id == CLIENT_KEY {
                 256
             } else {
@@ -515,6 +518,7 @@ impl App {
             .context("本地端口必须介于 1 和 65535 之间")?;
         let profile = Profile {
             router: self.text(ROUTER),
+            listen_ip: self.text(LISTEN_IP).trim().to_owned(),
             port,
             tdx_policy: self.text(TDX),
             snp_policy: self.text(SNP),
@@ -643,7 +647,7 @@ impl App {
                                 .context("本地端口无法监听，可能已被占用")?;
                             let _ = sender.send(Event::Started(
                                 generation,
-                                format!("http://{}/v1", listener.local_addr()?),
+                                crate::config::local_api_url(listener.local_addr()?),
                                 proxy.clone(),
                             ));
                             proxy.serve_until(listener, async { let _ = shutdown_rx.await; }).await?;
@@ -1004,10 +1008,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                     && app.inventory_task.is_none()
                     && app.by_id.contains_key(&URL)
                 {
-                    if id == PORT
-                        && let Ok(port) = app.text(PORT).parse::<u16>()
-                    {
-                        app.set(URL, &format!("http://127.0.0.1:{port}/v1"));
+                    if matches!(id, PORT | LISTEN_IP) {
+                        let address = app
+                            .text(LISTEN_IP)
+                            .trim()
+                            .parse::<std::net::IpAddr>()
+                            .ok()
+                            .zip(app.text(PORT).parse::<u16>().ok());
+                        app.set(
+                            URL,
+                            &address
+                                .map(|(ip, port)| crate::config::local_api_url((ip, port).into()))
+                                .unwrap_or_default(),
+                        );
                     }
                     if matches!(id, ROUTER | ROUTER_KEY | TDX | SNP) {
                         app.invalidate_catalog();

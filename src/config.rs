@@ -56,8 +56,12 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         crate::routing::Rules::new(self.routing.clone(), self.pool.clone())?;
         ensure!(
-            self.listen.ip().is_loopback(),
-            "The proxy must listen on a loopback IP"
+            self.listen.ip().is_loopback()
+                || self
+                    .client_key_env
+                    .as_ref()
+                    .is_some_and(|name| !name.trim().is_empty()),
+            "A local client key is required when listening outside loopback"
         );
         let url = reqwest::Url::parse(&self.router).context("Invalid router URL")?;
         ensure!(
@@ -119,4 +123,17 @@ impl Config {
         );
         Ok(trust)
     }
+}
+
+/// Wildcard binds still have a usable local Agent URL; remote clients use the
+/// machine's concrete IP. SocketAddr formatting also brackets IPv6 correctly.
+pub fn local_api_url(mut address: SocketAddr) -> String {
+    if address.ip().is_unspecified() {
+        address.set_ip(if address.is_ipv4() {
+            std::net::Ipv4Addr::LOCALHOST.into()
+        } else {
+            std::net::Ipv6Addr::LOCALHOST.into()
+        });
+    }
+    format!("http://{address}/v1")
 }

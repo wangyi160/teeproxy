@@ -1,10 +1,11 @@
 # Agent API base URL: http://127.0.0.1:8899/v1
+# Use a local interface IP, 0.0.0.0, or [::] for network access; client_key_env is then required.
 listen = "127.0.0.1:8899"
 router = "https://YOUR-APP-8443s.YOUR-CLUSTER.phala.network"
 router_key_env = "TEEPROXY_ROUTER_KEY"
 # Replace this empty allowlist with an independently reviewed release policy.
 tdx_policy = "policy/tdx-deny-all.json"
-# Optional separate local API key; send as Bearer, x-api-key or x-goog-api-key.
+# Separate local API key (required outside loopback); send as Bearer, x-api-key or x-goog-api-key.
 # client_key_env = "TEEPROXY_CLIENT_KEY"
 # Required for generation in fixed mode; use the full ID from /v1/pools.
 # pool = "m_MERCHANT.selected-pool"

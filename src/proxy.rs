@@ -188,11 +188,12 @@ impl Proxy {
         listener: TcpListener,
         shutdown: impl Future<Output = ()>,
     ) -> Result<()> {
-        ensure!(
-            listener.local_addr()?.ip().is_loopback(),
-            "Listener must be loopback"
-        );
         let address = listener.local_addr()?;
+        ensure!(
+            address.ip() == self.config.listen.ip()
+                && (self.config.listen.port() == 0 || address.port() == self.config.listen.port()),
+            "Listener does not match the configured address"
+        );
         // Owning these tasks makes stopping the listener stop existing clients too.
         let mut clients = tokio::task::JoinSet::new();
         tokio::pin!(shutdown);
@@ -203,9 +204,12 @@ impl Proxy {
                 _ = clients.join_next(), if !clients.is_empty() => continue,
                 accepted = listener.accept() => accepted?,
             };
-            if !peer.ip().is_loopback() {
+            if self.client_key.is_none() && !peer.ip().is_loopback() {
                 continue;
             }
+            // A wildcard listener has no concrete destination address. Validate
+            // Host against the actual local address of this accepted socket.
+            let address = socket.local_addr()?;
             let Ok(permit) = self.connections.clone().try_acquire_owned() else {
                 continue;
             };
@@ -499,7 +503,7 @@ fn route_request(request: &Request<Incoming>, address: SocketAddr) -> Result<Uri
         .host()
         .trim_start_matches('[')
         .trim_end_matches(']');
-    let matches_listener = host.eq_ignore_ascii_case("localhost")
+    let matches_listener = (address.ip().is_loopback() && host.eq_ignore_ascii_case("localhost"))
         || host
             .parse::<std::net::IpAddr>()
             .is_ok_and(|ip| ip == address.ip());
