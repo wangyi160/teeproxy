@@ -213,7 +213,7 @@ impl App {
     }
     pub(super) unsafe fn replace_catalog(&mut self, catalog: catalog::Catalog) {
         let preferred = self.account_pool_id.clone().or_else(|| {
-            let id = self.text(POOL);
+            let id = self.configured_pool.clone();
             (!id.is_empty()).then_some(id)
         });
         self.catalog = catalog;
@@ -431,7 +431,7 @@ impl App {
         profile.pool = pool.into();
         profile.routing.automatic = false;
         self.save_profile(&profile, &secrets)?;
-        self.set(POOL, pool);
+        self.configured_pool = pool.into();
         SendMessageW(self.by_id[&ROUTE_MODE], CB_SETCURSEL, 0, 0);
         self.refresh_route_pools();
         self.update_summary();
@@ -801,7 +801,7 @@ mod tests {
                 assert_eq!(state.model_rows.len(), 2);
                 let index = state.model_rows[0];
                 state.use_model(index).unwrap();
-                assert_eq!(state.text(POOL), "pool-a");
+                assert_eq!(state.configured_pool, "pool-a");
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
                 assert_eq!(proxy.routing_rules().pool.as_deref(), Some("pool-a"));
                 assert!(!proxy.routing_rules().policy.automatic);
@@ -845,7 +845,7 @@ mod tests {
                 assert_eq!(state.model_rows.len(), 2);
                 assert!(state.text(SEARCH).is_empty());
                 // Viewing a different pool never changes the saved routing rule.
-                assert_eq!(state.text(POOL), "pool-b");
+                assert_eq!(state.configured_pool, "pool-b");
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 // Refresh may reorder rows; preserve the selected pool by full ID.
                 pools["data"][0]["pool_name"] = serde_json::json!("second");
@@ -866,7 +866,7 @@ mod tests {
                 }
                 assert_eq!(state.model_pool().unwrap().id, "pool-a");
                 state.inventory_action(USE_POOL).unwrap();
-                assert_eq!(state.text(POOL), "pool-a");
+                assert_eq!(state.configured_pool, "pool-a");
                 assert_eq!(state.page, INVENTORY_PAGE);
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-a");
                 state.replace_catalog(

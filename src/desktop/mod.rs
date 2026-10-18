@@ -39,7 +39,6 @@ use zeroize::Zeroizing;
 const ROUTER: u16 = 101;
 const ROUTER_KEY: u16 = 102;
 const PORT: u16 = 103;
-const POOL: u16 = 104;
 const TDX: u16 = 105;
 const SNP: u16 = 106;
 const CLIENT_KEY: u16 = 107;
@@ -54,8 +53,8 @@ const COPY: u16 = 205;
 const BROWSE_TDX: u16 = 206;
 const BROWSE_SNP: u16 = 207;
 const SHOW_KEYS: u16 = 208;
-const FIELDS: [u16; 11] = [
-    ROUTER, ROUTER_KEY, LISTEN_IP, PORT, POOL, TDX, SNP, CLIENT_KEY, BROWSE_TDX, BROWSE_SNP, SAVE,
+const FIELDS: [u16; 10] = [
+    ROUTER, ROUTER_KEY, LISTEN_IP, PORT, TDX, SNP, CLIENT_KEY, BROWSE_TDX, BROWSE_SNP, SAVE,
 ];
 
 enum Event {
@@ -102,6 +101,7 @@ struct App {
     price_book: pricing::Book,
     prices_loaded: bool,
     price_rows: Vec<usize>,
+    configured_pool: String,
     account_pool_id: Option<String>,
     inventory_task: Option<JoinHandle<()>>,
     inventory_generation: u64,
@@ -143,6 +143,7 @@ impl App {
             price_book: Default::default(),
             prices_loaded: false,
             price_rows: Vec::new(),
+            configured_pool: String::new(),
             account_pool_id: None,
             inventory_task: None,
             inventory_generation: 0,
@@ -350,6 +351,7 @@ impl App {
                 Some(error.to_string()),
             ),
         };
+        self.configured_pool = profile.pool.clone();
         self.build_shell(&profile, &secrets)?;
         self.refresh_fonts();
         let mut rect = RECT {
@@ -538,7 +540,7 @@ impl App {
             port,
             tdx_policy: self.text(TDX),
             snp_policy: self.text(SNP),
-            pool: self.text(POOL),
+            pool: self.configured_pool.clone(),
             routing: self.routing_policy()?,
         };
         let secrets = Secrets {

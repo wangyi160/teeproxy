@@ -85,7 +85,7 @@ try {
     foreach ($id in @(501,502,503,504,505,506,302,303,304,307,310,312,313,314,315,316,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
-    foreach ($id in @(309,311,507,603,604,608)) {
+    foreach ($id in @(104,309,311,507,603,604,608)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -ne [IntPtr]::Zero) { throw "Removed routing control $id still exists" }
     }
     if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,605))) { throw 'Fixed pool maximum is disabled' }
@@ -104,7 +104,8 @@ try {
     Set-Control 103 $testPort
     if ((Read-Control 111) -ne '127.0.0.1') { throw 'Default listener is not loopback' }
     Set-Control 111 '0.0.0.0'
-    Set-Control 104 'test-pool'
+    [void][TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,601),0x014E,[IntPtr]1,[IntPtr]::Zero)
+    [void][TeeproxyUi]::Send($script:window,0x0111,[IntPtr](601 -bor (1 -shl 16)),[TeeproxyUi]::GetDlgItem($script:window,601))
     Set-Control 105 $policyFile
     Click-Control 201
     if (Test-Path -LiteralPath $settingsFile) { throw 'Wildcard settings saved without client authentication' }

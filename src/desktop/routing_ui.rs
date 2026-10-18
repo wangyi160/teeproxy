@@ -132,7 +132,7 @@ impl App {
         if !self.by_id.contains_key(&ROUTE_POOL) {
             return;
         }
-        let configured = self.text(POOL);
+        let configured = &self.configured_pool;
         let hwnd = self.by_id[&ROUTE_POOL];
         SendMessageW(hwnd, CB_RESETCONTENT, 0, 0);
         for pool in &self.catalog.pools {
@@ -144,7 +144,7 @@ impl App {
             self.catalog
                 .pools
                 .iter()
-                .position(|p| p.id == configured)
+                .position(|p| &p.id == configured)
                 .unwrap_or(usize::MAX),
             0,
         );
@@ -163,15 +163,15 @@ impl App {
                 self.text(ROUTE_MAX)
             )
         } else {
-            let id = self.text(POOL);
+            let id = &self.configured_pool;
             format!(
                 "指定账号池 · {} · ≤ {}×",
                 self.catalog
                     .pools
                     .iter()
-                    .find(|p| p.id == id)
+                    .find(|p| &p.id == id)
                     .map(|p| p.label.as_str())
-                    .unwrap_or(if id.is_empty() { "尚未选择" } else { &id }),
+                    .unwrap_or(if id.is_empty() { "尚未选择" } else { id }),
                 self.text(ROUTE_MAX)
             )
         };
@@ -222,7 +222,7 @@ impl App {
             self.routing_policy()
                 .is_ok_and(|draft| draft == active.policy)
                 && (active.policy.automatic
-                    || self.text(POOL).trim() == active.pool.as_deref().unwrap_or(""))
+                    || self.configured_pool.trim() == active.pool.as_deref().unwrap_or(""))
         })
     }
     pub(super) unsafe fn save_profile(
@@ -262,7 +262,7 @@ impl App {
                 if id == ROUTE_POOL {
                     let index = SendMessageW(self.by_id[&ROUTE_POOL], CB_GETCURSEL, 0, 0);
                     if let Some(pool) = self.catalog.pools.get(index as usize) {
-                        self.set(POOL, &pool.id);
+                        self.configured_pool = pool.id.clone();
                     }
                 }
                 self.update_route_controls(false);

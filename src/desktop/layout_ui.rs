@@ -224,24 +224,9 @@ impl App {
             "8899",
         )?;
         self.label("API key", [268, 574, 132, 24], 0)?;
-        self.edit(
-            CLIENT_KEY,
-            &secrets.client_key,
-            [412, 565, -472, 38],
-            0,
-            "与 Agent 的 API key 保持一致",
-        )?;
-        self.label("账号池", [268, 623, 132, 22], 0)?;
-        self.add(
-            POOL,
-            w!("STATIC"),
-            &profile.pool,
-            SS_LEFT,
-            [412, 623, -472, 22],
-            2,
-        )?;
-        self.button(SAVE, "保存设置", [244, 674, 132, 38], 0)?;
-        self.button(VERIFY, "验证连接", [392, 674, 132, 38], 0)?;
+        self.edit(CLIENT_KEY, &secrets.client_key, [412, 565, -472, 38], 0, "")?;
+        self.button(SAVE, "保存设置", [244, 636, 132, 38], 0)?;
+        self.button(VERIFY, "验证连接", [392, 636, 132, 38], 0)?;
 
         self.building_page = Some(LOG_PAGE);
         self.add(
@@ -384,7 +369,7 @@ impl App {
                 [244, 320, -280, 160],
                 [244, 496, -280, 116],
             ],
-            SETTINGS_PAGE => vec![[244, 120, -280, 316], [244, 448, -280, 204]],
+            SETTINGS_PAGE => vec![[244, 120, -280, 316], [244, 448, -280, 166]],
             INVENTORY_PAGE => inventory_cards(width, height).to_vec(),
             LOG_PAGE => vec![[244, 128, -280, -184]],
             ROUTE_PAGE => vec![[244, 128, -280, 382], [244, 572, -280, 42]],
