@@ -72,7 +72,7 @@ function Control-Shown([int]$Id) {
 }
 function Open-TestWindow {
     $script:appProcess = Start-Process -FilePath $Binary -ArgumentList @('gui','--settings',('"' + $settingsFile + '"')) -WindowStyle Hidden -PassThru
-    Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,609) -ne [IntPtr]::Zero }
+    Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,707) -ne [IntPtr]::Zero -and (Read-Control 110).Length -gt 0 }
 }
 function Close-TestWindow {
     if ($script:appProcess -and -not $script:appProcess.HasExited) {
@@ -108,9 +108,19 @@ try {
     Set-Control 105 $policyFile
     Click-Control 201
     if (Test-Path -LiteralPath $settingsFile) { throw 'Wildcard settings saved without client authentication' }
+    $saveFailure = -join [char[]]@(0x4fdd,0x5b58,0x5931,0x8d25)
+    $localKey = -join [char[]]@(0x672c,0x5730,0x5bc6,0x94a5)
+    if (-not (Read-Control 109).StartsWith($saveFailure) -or -not (Read-Control 109).Contains($localKey)) { throw 'Save did not show the missing local key reason on the current page' }
+    if ((Read-Control 111) -ne '0.0.0.0' -or (Read-Control 103) -ne "$testPort") { throw 'Failed save discarded the edited address' }
+    Set-Control 107 'short-local-key'
+    Click-Control 201
+    if (Test-Path -LiteralPath $settingsFile) { throw 'Settings saved with a short key' }
+    if (-not (Read-Control 109).StartsWith($saveFailure) -or -not (Read-Control 109).Contains('16')) { throw 'Save did not display the key length requirement' }
+    if ((Read-Control 109).Contains('short-local-key') -or (Read-Control 110).Contains('short-local-key')) { throw 'Invalid local key leaked in the error message' }
     Set-Control 107 'desktop-local-client-key-for-test'
     Click-Control 201
     Wait-Until { Test-Path -LiteralPath $settingsFile }
+    if (-not (Read-Control 109).StartsWith((-join [char[]]@(0x914d,0x7f6e,0x5df2,0x4fdd,0x5b58)))) { throw 'Successful save did not clear the earlier failure' }
     $saved = [IO.File]::ReadAllText($settingsFile)
     if ($saved.Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key persisted in plaintext' }
     if ($saved.Contains('desktop-local-client-key-for-test')) { throw 'Local key persisted in plaintext' }
@@ -140,7 +150,8 @@ try {
     Wait-Until { (Read-Control 609).StartsWith((-join [char[]]@(0x5df2,0x751f,0x6548))) }
     $liveSaved = [IO.File]::ReadAllText($settingsFile) | ConvertFrom-Json
     if ($liveSaved.profile.routing.max_multiplier_millionths -ne 500000) { throw 'Live rule not saved' }
-    if (-not (Read-Control 109).StartsWith((-join [char[]]@(0x8fd0,0x884c,0x4e2d)))) { throw 'Saving routing stopped the proxy' }
+    if ((Read-Control 203) -ne (-join [char[]]@(0x505c,0x6b62,0x4ee3,0x7406))) { throw 'Saving routing stopped the proxy' }
+    if (-not (Read-Control 109).StartsWith((-join [char[]]@(0x914d,0x7f6e,0x5df2,0x4fdd,0x5b58)))) { throw 'Live route save did not show confirmation' }
     # Exercise the actual notification-area callback, minimize, and close behavior.
     [void][TeeproxyUi]::Send($script:window,0x8011,[IntPtr]::Zero,[IntPtr]0x0400)
     Wait-Until { [TeeproxyUi]::IsWindowVisible($script:window) }

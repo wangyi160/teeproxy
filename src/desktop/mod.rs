@@ -511,6 +511,22 @@ impl App {
         SendMessageW(self.by_id[&LOG], EM_SETSEL, text.encode_utf16().count(), -1);
         SendMessageW(self.by_id[&LOG], EM_SCROLLCARET, 0, 0);
     }
+    unsafe fn action_failed(&mut self, id: u16, error: &anyhow::Error) {
+        let secrets = Secrets {
+            router_key: self.text(ROUTER_KEY),
+            client_key: self.text(CLIENT_KEY),
+        };
+        let action = if matches!(id, SAVE | ROUTE_SAVE) {
+            "保存失败"
+        } else {
+            "操作失败"
+        };
+        self.status(
+            &format!("{action}：{}", redact(&error.to_string(), &secrets)),
+            rgb(170, 40, 40),
+        );
+        self.append(&redact(&format!("{error:#}"), &secrets));
+    }
     unsafe fn snapshot(&self) -> Result<(Profile, Secrets)> {
         let port = self
             .text(PORT)
@@ -593,6 +609,14 @@ impl App {
                 self.save_profile(&profile, &secrets)?;
                 self.append("配置已保存，密钥已使用当前 Windows 用户加密。");
                 self.update_route_summary();
+                self.status(
+                    if self.running {
+                        "配置已保存 · 路由规则已生效"
+                    } else {
+                        "配置已保存 · 启动代理后生效"
+                    },
+                    rgb(30, 94, 166),
+                );
             }
             VERIFY | START if self.task.is_none() && self.inventory_task.is_none() => {
                 let (profile, secrets) = self.snapshot()?;
@@ -940,7 +964,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                     0
                 };
                 if let Err(error) = app.action(action) {
-                    app.append(&error.to_string());
+                    app.action_failed(action, &error);
                     tray::restore(hwnd);
                 }
                 return 0;
@@ -1033,8 +1057,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                         || matches!(id, tray::OPEN | tray::TOGGLE | tray::EXIT))
                     && let Err(error) = app.action(id)
                 {
-                    app.status("操作失败，请检查运行记录", rgb(170, 40, 40));
-                    app.append(&format!("{error:#}"));
+                    app.action_failed(id, &error);
                 }
                 return 0;
             }
