@@ -8,11 +8,11 @@
 Agent → http://127.0.0.1:8899/v1 → teeproxy → 已验证的 TLS 1.3 → teerouter
 ```
 
-agent 通过 base URL 直连 teeproxy。默认入口使用回环 HTTP，无需配置本地证书或 HTTP 代理。可配置本机具体 IP、`0.0.0.0` 或 `::`；非回环监听必须设置本地 API key。teeproxy 到 router 的连接始终使用 HTTPS 和独立 TEE 校验。
+agent 通过 base URL 直连 teeproxy。默认入口使用回环 HTTP，无需配置本地证书或 HTTP 代理。可配置本机具体 IP、`0.0.0.0` 或 `::`；非回环监听必须设置 teeproxy API key。teeproxy 到 router 的连接始终使用 HTTPS 和独立 TEE 校验。
 
 ## Windows 桌面版
 
-双击 `teeproxy.exe` 打开原生 Win32 窗口。左侧导航切换概览、账号与模型、连接设置、运行记录、路由策略和官方价格，右侧显示当前页面的详情。在连接设置填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口及可选本地 key；在路由策略选择账号池。
+双击 `teeproxy.exe` 打开原生 Win32 窗口。左侧导航切换概览、账号与模型、连接设置、运行记录、路由策略和官方价格，右侧显示当前页面的详情。在连接设置填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口及可选 teeproxy API key；在路由策略选择账号池。
 
 - **保存设置**：将设置保存到当前 Windows 用户目录，密钥由 Windows DPAPI 加密。
 - **验证连接**：在后台校验真实 router，显示校验结果，不发送业务密钥。
@@ -63,14 +63,14 @@ Codex：将 [provider 示例](examples/codex.config.toml) 合并到用户配置�
 
 Claude Code：设置上述 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY=teeproxy-local`，运行 `claude --model <router模型ID>`。
 
-agent 的占位 key 会被移除。真实 router key 由 teeproxy 管理，agent 无需持有；如设置了桌面版的本地 key 或命令行的 `client_key_env`，agent 应改用该独立本地 key。完整 PowerShell 命令、认证和版本迁移见 [客户端接入](docs/CLIENTS.md)。
+agent 的占位 key 会被移除。真实 router key 由 teeproxy 管理，agent 无需持有；如设置了桌面版的 teeproxy API key 或命令行的 `client_key_env`，agent 应改用该独立 teeproxy API key。完整 PowerShell 命令、认证和版本迁移见 [客户端接入](docs/CLIENTS.md)。
 
 ## 行为和范围
 
 - 原样转发允许接口的方法、路径、查询参数、JSON 字节和兼容头；不修改模型、prompt、tools 或 tool_choice。
 - 清理逐跳头、agent 认证和 Cookie，设置 router key；生成请求须配置固定 `pool` 或启用自动匹配，默认倍率上限为 1×。调用方的池、账号及报价版本头不能绕过该策略。
 - 响应状态和数据逐块转发，支持 SSE；取消、错误或超时关闭对应上游连接。已发出的请求不会自动重放。
-- 默认监听本机回环地址；支持配置 IP 和所有网卡监听，非回环地址必须使用本地 API key。核对请求实际连接的本机 IP 和端口，拒绝浏览器跨域请求、CONNECT、代理形式的目标 URL、管理接口和 URL 凭证。
+- 默认监听本机回环地址；支持配置 IP 和所有网卡监听，非回环地址必须使用 teeproxy API key。核对请求实际连接的本机 IP 和端口，拒绝浏览器跨域请求、CONNECT、代理形式的目标 URL、管理接口和 URL 凭证。
 - 支持模型/账号池/用量查询、Chat Completions、Responses、Messages 以及经验证的 router 健康查询。其他生成协议无法校验报价，拒绝转发。
 - 请求体及 gzip 解压后均限制为 2 MiB，默认 16 个并发请求和 128 个客户端连接。生成请求等待首个响应默认 300 秒，命令行配置项为 `response_header_timeout_secs`（1–3600 秒）；流空闲超时独立计算，默认 120 秒。等待响应超时返回 HTTP 504 / `router_response_timeout_request_not_replayed`，运行记录显示原因；已发送的请求不会自动重发。Router 和模型上游仍有各自的超时限制。
 

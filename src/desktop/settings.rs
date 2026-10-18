@@ -68,13 +68,13 @@ impl Profile {
             .context("监听 IP 必须是有效的 IPv4 或 IPv6 地址")?;
         ensure!(
             ip.is_loopback() || !secrets.client_key.is_empty(),
-            "监听局域网或所有网卡时，请设置本地密钥"
+            "监听局域网或所有网卡时，请设置 API key"
         );
         ensure!(
             secrets.client_key.is_empty()
                 || (16..=256).contains(&secrets.client_key.len())
                     && secrets.client_key.bytes().all(|c| c.is_ascii_graphic()),
-            "本地密钥须为 16–256 个可见 ASCII 字符"
+            "API key 须为 16–256 个可见 ASCII 字符"
         );
         let policy = |value: &str| (!value.trim().is_empty()).then(|| directory.join(value.trim()));
         let config = Config {

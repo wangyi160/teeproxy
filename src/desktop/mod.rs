@@ -712,15 +712,13 @@ impl App {
             SHOW_KEYS => {
                 let show =
                     SendMessageW(self.by_id[&SHOW_KEYS], BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
-                for id in [ROUTER_KEY, CLIENT_KEY] {
-                    SendMessageW(
-                        self.by_id[&id],
-                        EM_SETPASSWORDCHAR,
-                        if show { 0 } else { 0x25cf },
-                        0,
-                    );
-                    InvalidateRect(self.by_id[&id], ptr::null(), 1);
-                }
+                SendMessageW(
+                    self.by_id[&ROUTER_KEY],
+                    EM_SETPASSWORDCHAR,
+                    if show { 0 } else { 0x25cf },
+                    0,
+                );
+                InvalidateRect(self.by_id[&ROUTER_KEY], ptr::null(), 1);
             }
             _ => {}
         }

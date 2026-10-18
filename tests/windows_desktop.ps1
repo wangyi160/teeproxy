@@ -109,8 +109,7 @@ try {
     Click-Control 201
     if (Test-Path -LiteralPath $settingsFile) { throw 'Wildcard settings saved without client authentication' }
     $saveFailure = -join [char[]]@(0x4fdd,0x5b58,0x5931,0x8d25)
-    $localKey = -join [char[]]@(0x672c,0x5730,0x5bc6,0x94a5)
-    if (-not (Read-Control 109).StartsWith($saveFailure) -or -not (Read-Control 109).Contains($localKey)) { throw 'Save did not show the missing local key reason on the current page' }
+    if (-not (Read-Control 109).StartsWith($saveFailure) -or -not (Read-Control 109).Contains('API key')) { throw 'Save did not show the missing API key reason on the current page' }
     if ((Read-Control 111) -ne '0.0.0.0' -or (Read-Control 103) -ne "$testPort") { throw 'Failed save discarded the edited address' }
     Set-Control 107 'short-local-key'
     Click-Control 201
@@ -128,8 +127,15 @@ try {
     Open-TestWindow
     if ((Read-Control 101) -ne 'https://127.0.0.1:1' -or (Read-Control 103) -ne "$testPort") { throw 'Saved address/port did not restore' }
     if ((Read-Control 111) -ne '0.0.0.0') { throw 'Saved bind IP did not restore' }
-    # Password controls are masked, including after reopening.
+    # The Agent API key is restored visibly; the Router business key stays masked.
+    if ((Read-Control 107) -ne 'desktop-local-client-key-for-test') { throw 'Saved API key did not restore visibly' }
+    if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,107),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]::Zero) { throw 'Agent API key is masked after reopening' }
     if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,102),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -eq [IntPtr]::Zero) { throw 'Key control is not masked' }
+    foreach ($checked in @(1,0)) {
+        [void][TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,208),0x00F1,[IntPtr]$checked,[IntPtr]::Zero)
+        Click-Control 208
+        if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,107),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]::Zero) { throw 'Router key toggle hid the Agent API key' }
+    }
     Click-Control 202
     Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,202)) }
     if (-not (Read-Control 110).Contains('failed')) { throw 'Verification failure was not displayed' }

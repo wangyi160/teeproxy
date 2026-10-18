@@ -223,13 +223,13 @@ impl App {
             ES_NUMBER as u32,
             "8899",
         )?;
-        self.label("本地密钥", [268, 574, 132, 24], 0)?;
+        self.label("API key", [268, 574, 132, 24], 0)?;
         self.edit(
             CLIENT_KEY,
             &secrets.client_key,
             [412, 565, -472, 38],
-            ES_PASSWORD as u32,
-            "局域网访问必填；同时填入 Agent",
+            0,
+            "与 Agent 的 API key 保持一致",
         )?;
         self.label("账号池", [268, 623, 132, 22], 0)?;
         self.add(
