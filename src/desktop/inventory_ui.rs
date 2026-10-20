@@ -231,6 +231,11 @@ impl App {
         self.account_pool()
     }
     pub(super) unsafe fn replace_catalog(&mut self, catalog: catalog::Catalog) {
+        let routing_selection = self
+            .catalog
+            .pools
+            .get(SendMessageW(self.by_id[&ROUTE_POOL], CB_GETCURSEL, 0, 0) as usize)
+            .map(|p| p.id.clone());
         let preferred = self.account_pool_id.clone().or_else(|| {
             let id = self.configured_pool.clone();
             (!id.is_empty()).then_some(id)
@@ -240,6 +245,17 @@ impl App {
         // Preserve by full ID, never silently switch merchants when a pool disappears.
         self.render_pools(preferred.as_deref());
         self.refresh_route_pools();
+        if let Some(id) = routing_selection {
+            // Periodic refresh must not discard an unsaved routing selection.
+            let selected = self
+                .catalog
+                .pools
+                .iter()
+                .position(|p| p.id == id)
+                .unwrap_or(usize::MAX);
+            SendMessageW(self.by_id[&ROUTE_POOL], CB_SETCURSEL, selected, 0);
+            self.update_route_summary();
+        }
         self.render_catalog();
     }
     pub(super) fn account_pool(&self) -> Option<&catalog::Pool> {
@@ -892,11 +908,22 @@ mod tests {
                 assert_eq!(state.configured_pool, "pool-b");
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 // Refresh may reorder rows; preserve the selected pool by full ID.
+                let draft_pool = state
+                    .catalog
+                    .pools
+                    .iter()
+                    .position(|p| p.id == "pool-a")
+                    .unwrap();
+                SendMessageW(state.by_id[&ROUTE_POOL], CB_SETCURSEL, draft_pool, 0);
                 pools["data"][0]["pool_name"] = serde_json::json!("second");
                 pools["data"][1]["pool_name"] = serde_json::json!("first");
                 state.replace_catalog(catalog::parse(&models, &pools).unwrap());
                 assert_eq!(state.account_pool().unwrap().id, "pool-a");
                 assert_eq!(selected(state.by_id[&POOLS]), Some(2));
+                let selected_route =
+                    SendMessageW(state.by_id[&ROUTE_POOL], CB_GETCURSEL, 0, 0) as usize;
+                assert_eq!(state.catalog.pools[selected_route].id, "pool-a");
+                assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 assert_eq!(
                     SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
                     2
