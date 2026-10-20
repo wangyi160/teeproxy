@@ -71,7 +71,7 @@ impl App {
         self.route_combo(
             ROUTE_PRIORITY,
             [412, 360, -472, 160],
-            &["费率优先", "速率优先（实测）"],
+            &["费率优先", "低延迟优先"],
             (profile.routing.priority == Priority::Speed) as usize,
             false,
         )?;
@@ -81,7 +81,7 @@ impl App {
             2,
         )?;
         self.label(
-            "速率由 Router 测量首字时间和生成速度；无样本时从实际请求积累。",
+            "Router 每 5 分钟探测代理链路延迟，保持会话粘性。",
             [268, 448, -316, 24],
             2,
         )?;
@@ -183,7 +183,7 @@ impl App {
                     format!(
                         "自动匹配 · {}",
                         if active.policy.priority == Priority::Speed {
-                            "速率优先（实测）"
+                            "低延迟优先"
                         } else {
                             "费率优先"
                         }
