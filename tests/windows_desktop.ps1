@@ -1,4 +1,4 @@
-param([string]$Binary = "$PSScriptRoot/../target/release/teeproxy.exe")
+param([string]$Binary = "$PSScriptRoot/../target/release/teeproxy.exe", [switch]$Portable)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -35,6 +35,15 @@ $testDirectory = Join-Path (Split-Path $PSScriptRoot -Parent) ('target/windows-u
 New-Item -ItemType Directory -Path $testDirectory -Force | Out-Null
 $settingsFile = Join-Path $testDirectory 'desktop.json'
 $policyFile = Join-Path $testDirectory 'synthetic-test-only.json'
+$previousLocalAppData = $env:LOCALAPPDATA
+if ($Portable) {
+    $applicationDirectory = Join-Path $testDirectory 'application'
+    New-Item -ItemType Directory -Path $applicationDirectory | Out-Null
+    Copy-Item -LiteralPath $Binary -Destination (Join-Path $applicationDirectory 'teeproxy.exe')
+    $Binary = Join-Path $applicationDirectory 'teeproxy.exe'
+    $settingsFile = Join-Path $applicationDirectory 'data/desktop.json'
+    $env:LOCALAPPDATA = Join-Path $testDirectory 'unused-user-directory'
+}
 # Structurally valid but synthetic measurements; this never approves a real router.
 $policy = @{schema_version=1; releases=@(@{
     id='UI TEST ONLY'; mr_td=('01'*48); rtmrs=@(('02'*48),('03'*48),('04'*48));
@@ -71,7 +80,11 @@ function Control-Shown([int]$Id) {
     ([TeeproxyUi]::GetStyle([TeeproxyUi]::GetDlgItem($script:window,$Id),-16).ToInt64() -band 0x10000000) -ne 0
 }
 function Open-TestWindow {
-    $script:appProcess = Start-Process -FilePath $Binary -ArgumentList @('gui','--settings',('"' + $settingsFile + '"')) -WindowStyle Hidden -PassThru
+    if ($Portable) {
+        $script:appProcess = Start-Process -FilePath $Binary -WorkingDirectory $testDirectory -WindowStyle Hidden -PassThru
+    } else {
+        $script:appProcess = Start-Process -FilePath $Binary -ArgumentList @('gui','--settings',('"' + $settingsFile + '"')) -WindowStyle Hidden -PassThru
+    }
     Wait-Until { $script:window=[TeeproxyUi]::Find($script:appProcess.Id); $script:window -ne [IntPtr]::Zero -and [TeeproxyUi]::GetDlgItem($script:window,707) -ne [IntPtr]::Zero -and (Read-Control 110).Length -gt 0 }
 }
 function Close-TestWindow {
@@ -125,6 +138,24 @@ try {
     if ($saved.Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key persisted in plaintext' }
     if ($saved.Contains('desktop-local-client-key-for-test')) { throw 'Local key persisted in plaintext' }
     Close-TestWindow
+    if ($Portable) {
+        $portablePolicy = ($saved | ConvertFrom-Json).profile.tdx_policy
+        if ([IO.Path]::IsPathRooted($portablePolicy) -or -not $portablePolicy.StartsWith('policies\')) { throw 'Policy did not become a portable relative path' }
+        $copy = Join-Path (Split-Path $settingsFile -Parent) $portablePolicy
+        if ((Get-FileHash -LiteralPath $copy).Hash -ne (Get-FileHash -LiteralPath $policyFile).Hash) { throw 'Policy copy changed approved contents' }
+        $movedDirectory = Join-Path $testDirectory 'moved-application'
+        $allowedRoot = [IO.Path]::GetFullPath($testDirectory).TrimEnd('\') + '\'
+        foreach ($target in @($applicationDirectory,$movedDirectory,$policyFile,($policyFile + '.unavailable'))) {
+            if (-not [IO.Path]::GetFullPath($target).StartsWith($allowedRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Move escaped the test workspace' }
+        }
+        if (Test-Path -LiteralPath $movedDirectory) { throw 'Move target already exists' }
+        Move-Item -LiteralPath $applicationDirectory -Destination $movedDirectory
+        Move-Item -LiteralPath $policyFile -Destination ($policyFile + '.unavailable')
+        $Binary = Join-Path $movedDirectory 'teeproxy.exe'
+        $settingsFile = Join-Path $movedDirectory 'data/desktop.json'
+        # Windows shell APIs may create Microsoft/Windows/Caches themselves.
+        if (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'teeproxy')) { throw 'Portable app wrote its profile to AppData' }
+    }
     Open-TestWindow
     if ((Read-Control 101) -ne 'https://127.0.0.1:1' -or (Read-Control 103) -ne "$testPort") { throw 'Saved address/port did not restore' }
     if ((Read-Control 111) -ne '0.0.0.0') { throw 'Saved bind IP did not restore' }
@@ -206,4 +237,7 @@ try {
     $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$testPort)
     $portProbe.Start(); $portProbe.Stop()
     'Native desktop smoke passed: sidebar pages, save/reopen, live routing edits, masked key, inventory/verification failure, tray restore/minimize/close, background API, stop/exit listener cleanup'
-} finally { Close-TestWindow }
+    if ($Portable) { 'Portable desktop passed: executable-relative data, external policy import, folder move, encrypted credentials restored, no AppData writes' }
+} finally {
+    try { Close-TestWindow } finally { $env:LOCALAPPDATA = $previousLocalAppData }
+}

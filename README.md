@@ -12,9 +12,9 @@ agent 通过 base URL 直连 teeproxy。默认入口使用回环 HTTP，无需�
 
 ## Windows 桌面版
 
-双击 `teeproxy.exe` 打开原生 Win32 窗口。左侧导航切换概览、账号与模型、连接设置、运行记录、路由策略和官方价格，右侧显示当前页面的详情。在连接设置填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口及可选 teeproxy API key；在路由策略选择账号池。
+Windows 版为免安装便携程序，解压后双击 `teeproxy.exe` 打开原生 Win32 窗口。配置和 TDX/SNP 策略保存在程序同目录的 `data` 文件夹，移动时一起带走。左侧导航切换概览、账号与模型、连接设置、运行记录、路由策略和官方价格，右侧显示当前页面的详情。在连接设置填写上游 router 的 **HTTPS 根地址**、router key 和审核后的 TDX/SNP 策略文件，可以修改本地端口及可选 teeproxy API key；在路由策略选择账号池。
 
-- **保存设置**：将设置保存到当前 Windows 用户目录，密钥由 Windows DPAPI 加密。
+- **保存设置**：将设置保存到 `data/desktop.json`，外部策略文件复制到 `data/policies/` 并保存相对路径；密钥仍由 Windows DPAPI 加密。
 - **验证连接**：在后台校验真实 router，显示校验结果，不发送业务密钥。
 - **启动代理 / 停止代理**：右上角按钮控制本地 API 监听；停止会同时关闭现有连接和响应流。
 - **概览**：查看本地 `/v1` 地址、上游地址及模型和账号池数量，点击“复制地址”用于 agent 的 base URL。

@@ -2,7 +2,7 @@ use crate::config::Config;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     ptr,
 };
@@ -96,8 +96,35 @@ impl Profile {
     }
 }
 pub fn default_path() -> Result<PathBuf> {
-    let directory = std::env::var_os("LOCALAPPDATA").context("无法定位 Windows 用户配置目录")?;
-    Ok(PathBuf::from(directory).join("teeproxy/desktop.json"))
+    let executable = std::env::current_exe().context("无法定位 teeproxy 程序目录")?;
+    let path = portable_path(&executable)?;
+    if let Some(legacy) = std::env::var_os("LOCALAPPDATA") {
+        migrate_legacy(&path, &PathBuf::from(legacy).join("teeproxy/desktop.json"))?;
+    }
+    Ok(path)
+}
+fn portable_path(executable: &Path) -> Result<PathBuf> {
+    Ok(executable
+        .parent()
+        .context("无法定位 teeproxy 程序目录")?
+        .join("data/desktop.json"))
+}
+fn migrate_legacy(path: &Path, legacy: &Path) -> Result<()> {
+    // An existing portable profile is authoritative, including an unreadable one.
+    // Keep the old files as a backup; never fall back to writing AppData.
+    if path.try_exists()? || !legacy.try_exists()? {
+        return Ok(());
+    }
+    let (profile, secrets) = load(legacy).context("无法迁移旧版桌面配置")?;
+    save_from(
+        path,
+        &profile,
+        &secrets,
+        legacy.parent().context("旧版配置路径缺少目录")?,
+        false,
+    )
+    .context("无法将旧版配置迁移到程序 data 目录")?;
+    Ok(())
 }
 pub fn load(path: &Path) -> Result<(Profile, Secrets)> {
     if !path.exists() {
@@ -111,29 +138,50 @@ pub fn load(path: &Path) -> Result<(Profile, Secrets)> {
     let secrets = serde_json::from_slice(&plaintext).context("密钥数据无效")?;
     Ok((saved.profile, secrets))
 }
-pub fn save(path: &Path, profile: &Profile, secrets: &Secrets) -> Result<()> {
+pub fn save(path: &Path, profile: &Profile, secrets: &Secrets) -> Result<Profile> {
+    save_from(
+        path,
+        profile,
+        secrets,
+        path.parent().context("配置路径缺少目录")?,
+        true,
+    )
+}
+fn save_from(
+    path: &Path,
+    profile: &Profile,
+    secrets: &Secrets,
+    source_directory: &Path,
+    replace: bool,
+) -> Result<Profile> {
     let directory = path.parent().context("配置路径缺少目录")?;
-    profile.config(secrets, directory)?;
+    profile.config(secrets, source_directory)?;
     ensure!(
         secrets.router_key.len() <= 8192 && secrets.client_key.len() <= 256,
         "密钥过长"
     );
     let plaintext = Zeroizing::new(serde_json::to_vec(secrets)?);
     let protected_secrets = crypt(&plaintext, true)?.to_vec();
+    std::fs::create_dir_all(directory).context("无法写入配置目录，请将程序解压到可写目录")?;
+    let mut profile = profile.clone();
+    profile.tdx_policy = import_policy(&profile.tdx_policy, source_directory, directory, "tdx")?;
+    profile.snp_policy = import_policy(&profile.snp_policy, source_directory, directory, "snp")?;
     let bytes = serde_json::to_vec_pretty(&Saved {
         version: 1,
         profile: profile.clone(),
         protected_secrets,
     })?;
-    std::fs::create_dir_all(directory).context("无法创建配置目录")?;
     let temporary = directory.join(format!(".desktop-{}.tmp", crate::protocol::random_hex()?));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&temporary)?;
-    file.write_all(&bytes)?;
-    file.sync_all()?;
+    let written = file.write_all(&bytes).and_then(|()| file.sync_all());
     drop(file);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error).context("无法保存桌面配置");
+    }
     let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     // Both strings are terminated UTF-16; MoveFileEx atomically replaces this file.
@@ -141,7 +189,12 @@ pub fn save(path: &Path, profile: &Profile, secrets: &Secrets) -> Result<()> {
         MoveFileExW(
             from.as_ptr(),
             to.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            MOVEFILE_WRITE_THROUGH
+                | if replace {
+                    MOVEFILE_REPLACE_EXISTING
+                } else {
+                    0
+                },
         )
     };
     if ok == 0 {
@@ -149,7 +202,61 @@ pub fn save(path: &Path, profile: &Profile, secrets: &Secrets) -> Result<()> {
         let _ = std::fs::remove_file(&temporary);
         return Err(error).context("无法保存桌面配置");
     }
-    Ok(())
+    Ok(profile)
+}
+
+fn import_policy(value: &str, source: &Path, destination: &Path, kind: &str) -> Result<String> {
+    if value.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let root = destination.canonicalize()?;
+    let original = source
+        .join(value.trim())
+        .canonicalize()
+        .with_context(|| format!("无法读取 {} 策略文件", kind.to_uppercase()))?;
+    ensure!(original.is_file(), "策略路径必须指向文件");
+    if let Ok(relative) = original.strip_prefix(&root) {
+        return Ok(relative.to_string_lossy().into_owned());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(&original)?
+        .take(512 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 512 * 1024, "策略文件过大");
+    let policies = root.join("policies");
+    std::fs::create_dir_all(&policies)?;
+    ensure!(
+        policies.canonicalize()?.starts_with(&root),
+        "策略目录必须位于配置目录内"
+    );
+    let name = original.file_name().context("策略文件缺少文件名")?;
+    let mut target = policies.join(name);
+    if target.try_exists()? && std::fs::read(&target)? != bytes {
+        use sha2::{Digest, Sha256};
+        target = policies.join(format!("{kind}-{:x}.json", Sha256::digest(&bytes)));
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target)
+    {
+        Ok(mut file) => {
+            let written = file.write_all(&bytes).and_then(|()| file.sync_all());
+            drop(file);
+            if let Err(error) = written {
+                let _ = std::fs::remove_file(&target);
+                return Err(error).context("无法保存本地策略副本");
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure!(
+                target.canonicalize()?.starts_with(&root) && std::fs::read(&target)? == bytes,
+                "本地策略副本冲突"
+            );
+        }
+        Err(error) => return Err(error).context("无法保存本地策略副本"),
+    }
+    Ok(target.strip_prefix(root)?.to_string_lossy().into_owned())
 }
 use std::os::windows::ffi::OsStrExt;
 
@@ -208,6 +315,190 @@ fn crypt(bytes: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestDirectory(PathBuf);
+    impl TestDirectory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "teeproxy-portable-{}",
+                crate::protocol::random_hex().unwrap()
+            ));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let target = self.0.canonicalize().unwrap();
+            assert!(target.starts_with(std::env::temp_dir().canonicalize().unwrap()));
+            assert!(
+                target
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("teeproxy-portable-")
+            );
+            std::fs::remove_dir_all(target).unwrap();
+        }
+    }
+
+    fn fixture_profile() -> Profile {
+        Profile {
+            router: "https://router.example".into(),
+            routing: crate::routing::Policy {
+                automatic: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn portable_migration_preserves_keys_policies_and_survives_folder_move() {
+        let temp = TestDirectory::new();
+        let legacy = temp.0.join("old-user-profile");
+        std::fs::create_dir(&legacy).unwrap();
+        let tdx = legacy.join("phala-tdx.json");
+        let snp = legacy.join("snp.json");
+        std::fs::write(&tdx, b"reviewed-tdx-policy").unwrap();
+        std::fs::write(&snp, b"reviewed-snp-policy").unwrap();
+        let mut profile = fixture_profile();
+        profile.tdx_policy = tdx.to_str().unwrap().into();
+        profile.snp_policy = "snp.json".into();
+        let keys = Secrets {
+            router_key: "private-router-token".into(),
+            client_key: "private-local-token".into(),
+        };
+        // Old versions could store absolute and relative external paths.
+        let legacy_file = legacy.join("desktop.json");
+        let old = serde_json::to_vec(&Saved {
+            version: 1,
+            profile,
+            protected_secrets: crypt(&serde_json::to_vec(&keys).unwrap(), true)
+                .unwrap()
+                .to_vec(),
+        })
+        .unwrap();
+        std::fs::write(&legacy_file, &old).unwrap();
+        let exe = temp.0.join("portable/teeproxy.exe");
+        let portable = portable_path(&exe).unwrap();
+        assert_eq!(portable, temp.0.join("portable/data/desktop.json"));
+        migrate_legacy(&portable, &legacy_file).unwrap();
+        assert_eq!(std::fs::read(&legacy_file).unwrap(), old);
+        let (saved, decrypted) = load(&portable).unwrap();
+        assert_eq!(decrypted.router_key, keys.router_key);
+        assert_eq!(decrypted.client_key, keys.client_key);
+        assert!(saved.routing.automatic);
+        for value in [&saved.tdx_policy, &saved.snp_policy] {
+            assert!(Path::new(value).is_relative());
+            assert!(Path::new(value).starts_with("policies"));
+        }
+        assert!(
+            !std::fs::read_to_string(&portable)
+                .unwrap()
+                .contains(&keys.router_key)
+        );
+        // A different launch directory or moving the app must not change resolution.
+        let moved = temp.0.join("moved-application");
+        std::fs::rename(exe.parent().unwrap(), &moved).unwrap();
+        std::fs::remove_file(&tdx).unwrap();
+        std::fs::remove_file(&snp).unwrap();
+        let moved_profile = moved.join("data/desktop.json");
+        let (saved, decrypted) = load(&moved_profile).unwrap();
+        let config = saved
+            .config(&decrypted, moved_profile.parent().unwrap())
+            .unwrap();
+        assert_eq!(
+            std::fs::read(config.tdx_policy.unwrap()).unwrap(),
+            b"reviewed-tdx-policy"
+        );
+        assert_eq!(
+            std::fs::read(config.snp_policy.unwrap()).unwrap(),
+            b"reviewed-snp-policy"
+        );
+        // Existing portable profiles are never replaced by old AppData settings.
+        let before = std::fs::read(&moved_profile).unwrap();
+        std::fs::write(&legacy_file, b"invalid-old-profile").unwrap();
+        migrate_legacy(&moved_profile, &legacy_file).unwrap();
+        assert_eq!(std::fs::read(&moved_profile).unwrap(), before);
+    }
+
+    #[test]
+    fn external_policy_copy_is_relative_collision_safe_and_failure_keeps_saved_profile() {
+        let temp = TestDirectory::new();
+        let external = temp.0.join("outside.json");
+        std::fs::write(&external, b"original-policy").unwrap();
+        let path = temp.0.join("application/data/desktop.json");
+        let mut profile = fixture_profile();
+        profile.tdx_policy = external.to_str().unwrap().into();
+        let keys = Secrets::default();
+        let first = save(&path, &profile, &keys).unwrap();
+        let base = path.parent().unwrap();
+        assert_eq!(
+            Path::new(&first.tdx_policy),
+            Path::new("policies/outside.json")
+        );
+        // Same-name policy changes get a new file; the old approved bytes stay intact.
+        std::fs::write(&external, b"new-policy").unwrap();
+        let second = save(&path, &profile, &keys).unwrap();
+        assert_ne!(first.tdx_policy, second.tdx_policy);
+        assert_eq!(
+            std::fs::read(base.join(&first.tdx_policy)).unwrap(),
+            b"original-policy"
+        );
+        assert_eq!(
+            std::fs::read(base.join(&second.tdx_policy)).unwrap(),
+            b"new-policy"
+        );
+        assert_eq!(
+            save(&path, &profile, &keys).unwrap().tdx_policy,
+            second.tdx_policy
+        );
+        let before = std::fs::read(&path).unwrap();
+        profile.snp_policy = "missing.json".into();
+        assert!(save(&path, &profile, &keys).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(std::fs::read(&external).unwrap(), b"new-policy");
+    }
+
+    #[test]
+    fn failed_migration_does_not_create_portable_profile_or_overwrite_existing_one() {
+        let temp = TestDirectory::new();
+        let legacy = temp.0.join("legacy.json");
+        let path = temp.0.join("application/data/desktop.json");
+        migrate_legacy(&path, &legacy).unwrap();
+        assert!(!path.exists());
+        let mut profile = fixture_profile();
+        profile.tdx_policy = "missing.json".into();
+        let old = serde_json::to_vec(&Saved {
+            version: 1,
+            profile,
+            protected_secrets: crypt(&serde_json::to_vec(&Secrets::default()).unwrap(), true)
+                .unwrap()
+                .to_vec(),
+        })
+        .unwrap();
+        std::fs::write(&legacy, &old).unwrap();
+        assert!(migrate_legacy(&path, &legacy).is_err());
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&legacy).unwrap(), old);
+        std::fs::write(&path, b"corrupt-portable-profile").unwrap();
+        migrate_legacy(&path, &legacy).unwrap();
+        assert!(load(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"corrupt-portable-profile");
+        let blocked = temp.0.join("not-a-directory");
+        std::fs::write(&blocked, b"existing-file").unwrap();
+        assert!(
+            save(
+                &blocked.join("desktop.json"),
+                &fixture_profile(),
+                &Secrets::default()
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(blocked).unwrap(), b"existing-file");
+    }
+
     #[test]
     fn dpapi_round_trip_and_tamper_rejection() {
         let secret = b"router-key-must-not-be-plaintext";
@@ -226,6 +517,8 @@ mod tests {
             crate::protocol::random_hex().unwrap()
         ));
         let path = dir.join("desktop.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("approved.json"), b"{}").unwrap();
         let profile = Profile {
             router: "https://router.invalid:8443".into(),
             listen_ip: "0.0.0.0".into(),
@@ -258,6 +551,7 @@ mod tests {
         std::fs::write(&path, b"{}").unwrap();
         assert!(load(&path).is_err());
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(dir.join("approved.json")).unwrap();
         std::fs::remove_dir(&dir).unwrap();
     }
 

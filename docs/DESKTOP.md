@@ -82,12 +82,26 @@ Codex 使用 `http://127.0.0.1:端口/v1`；Claude Code 的 `ANTHROPIC_BASE_URL`
 
 ## 保存位置
 
-桌面配置默认位于 `%LOCALAPPDATA%\teeproxy\desktop.json`。上游地址、端口和策略路径以普通配置存储，router key 与 teeproxy API key 使用当前 Windows 用户的 DPAPI 加密后保存。配置文件不会包含明文 key；它仍应保存在自己的用户目录中。其他用户或设备通常无法解密，需要重新填写密钥。
+Windows 版是免安装便携程序，默认只在 `teeproxy.exe` 同目录的 `data` 文件夹保存数据，与启动时的工作目录无关：
 
-相对策略路径以桌面配置文件所在目录为基准；文件选择器保存完整路径。修改表单后需要点击“保存设置”，未保存的值仍可用于本次验证和运行。损坏或无法解密的配置会显示错误，软件不会静默覆盖原文件。
+```text
+teeproxy.exe
+data/
+  desktop.json
+  policies/
+    phala-tdx.json
+```
+
+点击“保存设置”后，选自其他目录的 TDX/SNP 策略会原样复制到 `data/policies/`，界面与配置使用相对路径。`data` 内已有的策略保存为相对于 `data` 的路径。同名但内容不同的策略使用带摘要的文件名，避免覆盖已保存的策略。移动软件时带上整个文件夹；升级时替换程序，保留 `data`。程序目录不可写会明确报错，不会改存到 AppData。
+
+首次升级时，若没有 `data/desktop.json`，会从旧版 `%LOCALAPPDATA%\teeproxy\desktop.json` 迁入配置、密钥及策略副本。已有的便携配置优先；旧文件保留作为备份，之后不再使用或更新。迁移失败会报错，不会用空配置覆盖旧数据。
+
+上游地址、端口和策略路径以普通配置存储，router key 与 teeproxy API key 仍由当前 Windows 用户的 DPAPI 加密，文件不含明文 key。同一 Windows 用户下移动目录无需重新填写密钥；换用户或换电脑通常不能解密，需要重新配置凭证。损坏或无法解密的配置会显示错误，不会静默覆盖原文件。
+
+修改表单后需要点击“保存设置”，未保存的值仍可用于本次验证和运行。复制策略文件不会修改批准的发布项，连接前仍须通过完整 TEE 校验。
 
 可通过 `teeproxy.exe gui --settings C:\path\desktop.json` 使用单独的桌面配置。桌面设置与命令行的 `teeproxy.toml` 分开保存；命令行仍通过环境变量读取业务 key。
 
 TDX 为默认构建功能，SNP 需要 `--features snp-verifier` 或 `--all-features`。界面会提示当前构建是否包含 SNP 验证。
 
-Windows 发布前可运行 `tests/windows_desktop.ps1`，验证侧栏导航、保存和恢复、密钥遮挡、验证/刷新失败、托盘恢复、最小化/关闭后继续服务及停止/退出后的端口释放。脚本仅使用本地隔离目录和测试密钥，不会接入真实 router。
+Windows 发布前可运行 `tests/windows_desktop.ps1`，验证侧栏导航、保存和恢复、密钥遮挡、验证/刷新失败、托盘恢复、最小化/关闭后继续服务及停止/退出后的端口释放。加上 `-Portable` 会通过默认启动入口检查便携目录、外部策略复制、整个文件夹移动后的恢复及不写入 AppData。脚本仅使用本地隔离目录和测试密钥，不会接入真实 router。

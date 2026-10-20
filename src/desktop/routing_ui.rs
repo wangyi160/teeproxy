@@ -244,7 +244,9 @@ impl App {
             );
         }
         // Persist first: invalid input or a failed disk write never changes live rules.
-        settings::save(&self.path, profile, secrets)?;
+        let saved = settings::save(&self.path, profile, secrets)?;
+        self.set(TDX, &saved.tdx_policy);
+        self.set(SNP, &saved.snp_policy);
         if let Some(proxy) = &self.live_proxy {
             proxy.replace_routing(rules);
             self.append("路由规则已生效：新请求使用新规则，正在进行的请求继续使用原规则。");
