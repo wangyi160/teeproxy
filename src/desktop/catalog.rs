@@ -21,6 +21,7 @@ pub(crate) struct Pool {
     pub state: String,
     pub label: String,
     pub account_count: usize,
+    pub latency: Probe,
 }
 pub(crate) struct Model {
     pub id: String,
@@ -35,6 +36,71 @@ pub(crate) struct Account {
     pub state: String,
     pub catalog: String,
     pub models: String,
+    pub latency: Probe,
+}
+pub(crate) struct Probe {
+    status: String,
+    ms: Option<f64>,
+    expires_at: Option<u64>,
+    pub checked: String,
+}
+impl Probe {
+    fn parse(value: &Value) -> Self {
+        Self {
+            status: text(&value["status"]),
+            ms: value["latency_ms"]
+                .as_f64()
+                .filter(|v| v.is_finite() && *v >= 0.0),
+            expires_at: value["expires_at"].as_u64(),
+            checked: value["checked_at"]
+                .as_u64()
+                .and_then(checked_time)
+                .unwrap_or_else(|| "—".into()),
+        }
+    }
+    fn display_at(&self, now: u64) -> String {
+        if self.expires_at.is_some_and(|t| t <= now) {
+            return "已过期".into();
+        }
+        match self.status.as_str() {
+            "measured" if self.ms.is_some() => format!("{:.1} ms", self.ms.unwrap()),
+            "failed" => "测速失败".into(),
+            "stale" => "已过期".into(),
+            "unavailable" => "不可用".into(),
+            _ => "未测速".into(),
+        }
+    }
+    pub fn display(&self) -> String {
+        self.display_at(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        )
+    }
+}
+fn checked_time(seconds: u64) -> Option<String> {
+    use windows_sys::Win32::{
+        Foundation::{FILETIME, SYSTEMTIME},
+        System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime},
+    };
+    let ticks = seconds
+        .checked_mul(10_000_000)?
+        .checked_add(116_444_736_000_000_000)?;
+    let file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let (mut utc, mut local) = (SYSTEMTIME::default(), SYSTEMTIME::default());
+    if unsafe { FileTimeToSystemTime(&file, &mut utc) } == 0
+        || unsafe { SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) } == 0
+    {
+        return None;
+    }
+    Some(format!(
+        "{:02}-{:02} {:02}:{:02}:{:02}",
+        local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond
+    ))
 }
 pub(crate) async fn fetch(config: &Config, key: &str) -> Result<Catalog> {
     let trust = config.trust()?;
@@ -184,6 +250,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             state: state.into(),
             label,
             account_count: accounts.len(),
+            latency: Probe::parse(&pool["proxy_latency"]),
         });
         for account in accounts {
             ensure!(result.accounts.len() < 10000, "账号记录过多");
@@ -216,6 +283,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
                     .as_u64()
                     .map(|v| v.to_string())
                     .unwrap_or("—".into()),
+                latency: Probe::parse(&account["proxy_latency"]),
             });
         }
     }
@@ -335,6 +403,25 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn latency_display_handles_missing_failed_and_expired_measurements() {
+        use super::*;
+        let value = serde_json::json!({"status":"measured", "latency_ms":170.25,
+            "checked_at":1792000000, "expires_at":1792000600, "proxy":"must-never-display"});
+        let probe = Probe::parse(&value);
+        assert_eq!(probe.display_at(1792000000), "170.2 ms");
+        assert_eq!(probe.display_at(1792000600), "已过期");
+        assert_ne!(probe.checked, "—");
+        assert_eq!(Probe::parse(&Value::Null).display_at(0), "未测速");
+        assert_eq!(
+            Probe::parse(&serde_json::json!({"status":"failed","latency_ms":1})).display_at(0),
+            "测速失败"
+        );
+        assert_eq!(
+            Probe::parse(&serde_json::json!({"status":"measured","latency_ms":-1})).display_at(0),
+            "未测速"
+        );
+    }
     use super::*;
     use serde_json::json;
     #[test]

@@ -39,11 +39,26 @@ pub(super) fn inventory_rect(id: u16, width: i32, height: i32) -> Option<[i32; 4
 }
 
 impl App {
+    pub(super) unsafe fn redraw_latencies(&self) {
+        // Update cells in place so expiration never resets selection or scroll.
+        for (row, pool) in self.catalog.pools.iter().enumerate() {
+            latency_cell(self.by_id[&POOLS], row, 4, &pool.latency.display());
+        }
+        for (row, account) in self
+            .catalog
+            .accounts
+            .iter()
+            .filter(|a| Some(&a.pool) == self.account_pool_id.as_ref())
+            .enumerate()
+        {
+            latency_cell(self.by_id[&ACCOUNTS], row, 2, &account.latency.display());
+        }
+    }
     pub(super) unsafe fn scale_inventory_columns(&self) {
         for (id, widths) in [
             (MODELS, &[282, 124][..]),
-            (POOLS, &[144, 120, 104, 84, 152, 124][..]),
-            (ACCOUNTS, &[104, 72, 78, 64][..]),
+            (POOLS, &[120, 100, 84, 72, 120, 100, 100, 132][..]),
+            (ACCOUNTS, &[104, 72, 100, 132, 78, 64][..]),
             (PRICES, &[220, 96, 210, 88, 88, 88][..]),
         ] {
             if let Some(hwnd) = self.by_id.get(&id) {
@@ -108,12 +123,14 @@ impl App {
         self.table(
             POOLS,
             &[
-                ("账号池", 144),
-                ("商户", 120),
-                ("价格倍率", 104),
-                ("账号数量", 84),
-                ("模型提供商", 152),
-                ("状态", 124),
+                ("账号池", 120),
+                ("商户", 100),
+                ("价格倍率", 84),
+                ("账号数量", 72),
+                ("最低链路延迟", 120),
+                ("模型提供商", 100),
+                ("状态", 100),
+                ("测速时间", 132),
             ],
         )?;
         self.add(
@@ -129,6 +146,8 @@ impl App {
             &[
                 ("账号", 104),
                 ("状态", 72),
+                ("链路延迟", 100),
+                ("测速时间", 132),
                 ("模型目录", 78),
                 ("模型数", 64),
             ],
@@ -262,8 +281,10 @@ impl App {
                     p.merchant.clone(),
                     p.multiplier.clone(),
                     p.account_count.to_string(),
+                    p.latency.display(),
                     p.provider.clone(),
                     p.state.clone(),
+                    p.latency.checked.clone(),
                 ]
             })
             .collect::<Vec<_>>();
@@ -318,10 +339,12 @@ impl App {
             .filter(|a| Some(&a.pool) == self.account_pool_id.as_ref())
             .map(|a| {
                 vec![
-                    a.id.as_str(),
-                    a.state.as_str(),
-                    a.catalog.as_str(),
-                    a.models.as_str(),
+                    a.id.clone(),
+                    a.state.clone(),
+                    a.latency.display(),
+                    a.latency.checked.clone(),
+                    a.catalog.clone(),
+                    a.models.clone(),
                 ]
             })
             .collect::<Vec<_>>();
@@ -463,6 +486,7 @@ impl App {
             "请先在连接设置填写 Router key"
         );
         self.inventory_generation += 1;
+        self.inventory_refreshed = std::time::Instant::now();
         self.inventory_finished_observed = false;
         let generation = self.inventory_generation;
         let sender = self.sender.clone();
@@ -525,6 +549,20 @@ impl App {
 pub(super) unsafe fn selected(hwnd: HWND) -> Option<usize> {
     let index = SendMessageW(hwnd, LVM_GETNEXTITEM, usize::MAX, LVNI_SELECTED as isize);
     (index >= 0).then_some(index as usize)
+}
+unsafe fn latency_cell(hwnd: HWND, row: usize, column: i32, text: &str) {
+    let mut text = wide(text);
+    let item = LVITEMW {
+        iSubItem: column,
+        pszText: text.as_mut_ptr(),
+        ..mem::zeroed()
+    };
+    SendMessageW(
+        hwnd,
+        LVM_SETITEMTEXTW,
+        row,
+        (&item as *const LVITEMW) as isize,
+    );
 }
 pub(super) unsafe fn fill<T: AsRef<str>>(hwnd: HWND, rows: &[Vec<T>]) {
     // WM_SETREDRAW(TRUE) sets WS_VISIBLE, so never use it on a hidden page.
@@ -688,6 +726,10 @@ mod tests {
                     {"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":false}]},
                     {"id":"pool-empty","accounts":[]}
                 ]});
+                let probe = serde_json::json!({"status":"measured","latency_ms":170.25,
+                    "checked_at":1792000000,"expires_at":4102444800u64});
+                pools["data"][0]["proxy_latency"] = probe.clone();
+                pools["data"][0]["accounts"][0]["proxy_latency"] = probe;
                 let catalog = catalog::parse(&models, &pools).unwrap();
                 state.replace_catalog(catalog);
                 SendMessageW(state.by_id[&ROUTE_MODE], CB_SETCURSEL, 1, 0);
@@ -700,6 +742,7 @@ mod tests {
                 assert_eq!(state.model_pool().unwrap().id, "pool-b");
                 assert_eq!(state.account_pool().unwrap().id, "pool-b");
                 assert_eq!(SendMessageW(state.by_id[&POOLS], LVM_GETITEMCOUNT, 0, 0), 3);
+                assert_eq!(cell_text(state.by_id[&POOLS], 0, 4), "170.2 ms");
                 assert_eq!(cell_text(state.by_id[&POOLS], 0, 3), "2");
                 assert_eq!(cell_text(state.by_id[&POOLS], 1, 3), "1");
                 assert_eq!(cell_text(state.by_id[&POOLS], 2, 3), "0");
@@ -840,6 +883,7 @@ mod tests {
                     2
                 );
                 assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 0), "account-a");
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 2), "170.2 ms");
                 assert_eq!(cell_text(state.by_id[&ACCOUNTS], 1, 1), "已停用");
                 assert_eq!(state.model_pool().unwrap().id, "pool-a");
                 assert_eq!(state.model_rows.len(), 2);

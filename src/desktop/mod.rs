@@ -106,6 +106,8 @@ struct App {
     inventory_task: Option<JoinHandle<()>>,
     inventory_generation: u64,
     inventory_finished_observed: bool,
+    inventory_refreshed: std::time::Instant,
+    latency_redrawn: std::time::Instant,
     tray: Option<tray::Tray>,
 }
 
@@ -148,6 +150,8 @@ impl App {
             inventory_task: None,
             inventory_generation: 0,
             inventory_finished_observed: false,
+            inventory_refreshed: std::time::Instant::now(),
+            latency_redrawn: std::time::Instant::now(),
             tray: None,
         })
     }
@@ -912,6 +916,22 @@ impl App {
                 self.busy(self.task.is_some());
             } else {
                 self.inventory_finished_observed = true;
+            }
+        }
+        if self.page == INVENTORY_PAGE && IsWindowVisible(self.hwnd) != 0 && self.catalog_loaded {
+            if self.latency_redrawn.elapsed().as_secs() >= 15 {
+                self.redraw_latencies();
+                self.latency_redrawn = std::time::Instant::now();
+            }
+            if self.running
+                && !self.stopping
+                && self.inventory_task.is_none()
+                && self.inventory_refreshed.elapsed().as_secs() >= 300
+            {
+                self.inventory_refreshed = std::time::Instant::now();
+                if let Err(error) = self.refresh_catalog() {
+                    self.append(&error.to_string());
+                }
             }
         }
     }
