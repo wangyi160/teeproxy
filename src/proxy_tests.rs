@@ -364,6 +364,54 @@ async fn rules_are_sent_without_local_catalog_selection_and_router_result_is_dis
         }
     }
 }
+
+#[tokio::test]
+async fn agent_identity_is_preserved_for_router_enforcement_without_inventing_a_client() {
+    let upstream = upstream("teeproxy-unit-test", "json").await;
+    let gateway = proxy(config(&upstream), true, None).await;
+    for (ua, hint, value) in [
+        ("codex_cli_rs/1.0", "originator", "codex_cli_rs"),
+        ("claude-cli/2.1.0 (external, cli)", "x-app", "cli"),
+        ("grok-shell/1.0", "x-grok-client-identifier", "grok-shell"),
+        ("GitHubCopilotChat/1.0", "x-test-client", "unsupported"),
+    ] {
+        let response = agent()
+            .post(format!("{}/v1/responses", gateway.url))
+            .header("user-agent", ua)
+            .header(hint, value)
+            .json(&json!({"model":"model-test","input":"hello"}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 201);
+        response.bytes().await.unwrap();
+        let calls = upstream.calls.lock().unwrap();
+        let sent = calls
+            .iter()
+            .rev()
+            .find(|c| c.path == "/v1/responses")
+            .unwrap();
+        assert_eq!(sent.headers["user-agent"], ua);
+        assert_eq!(sent.headers[hint], value);
+    }
+    let response = agent()
+        .post(format!("{}/v1/responses", gateway.url))
+        .json(&json!({"model":"chatgpt/model-test"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 201);
+    response.bytes().await.unwrap();
+    let calls = upstream.calls.lock().unwrap();
+    let sent = calls
+        .iter()
+        .rev()
+        .find(|c| c.path == "/v1/responses")
+        .unwrap();
+    assert!(!sent.headers.contains_key("originator"));
+    assert!(!sent.headers.contains_key("x-app"));
+    assert!(!sent.headers.contains_key("x-grok-client-identifier"));
+}
 #[tokio::test]
 async fn router_rejections_are_forwarded_once_and_old_routers_receive_no_generation() {
     for (mode, status, code, count) in [
