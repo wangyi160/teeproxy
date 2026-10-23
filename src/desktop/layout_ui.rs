@@ -3,7 +3,9 @@
 use super::*;
 
 pub(super) const NAV_FIRST: u16 = 501;
-pub(super) const NAV_LAST: u16 = 506;
+pub(super) const NAV_LAST: u16 = 507;
+pub(super) const OPEN_ACCOUNT: u16 = 1510;
+pub(super) const ACCOUNT_PLATFORM: u16 = 1511;
 pub(super) const PAGE_TITLE: u16 = 509;
 pub(super) const PAGE_DESCRIPTION: u16 = 510;
 pub(super) const OPEN_SETTINGS: u16 = 511;
@@ -19,7 +21,8 @@ pub(super) const SETTINGS_PAGE: usize = 2;
 pub(super) const LOG_PAGE: usize = 3;
 pub(super) const ROUTE_PAGE: usize = 4;
 pub(super) const PRICE_PAGE: usize = 5;
-const PAGES: [(&str, &str); 6] = [
+pub(super) const ACCOUNT_PAGE: usize = 6;
+const PAGES: [(&str, &str); 7] = [
     ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
     (
         "账号与模型",
@@ -32,6 +35,7 @@ const PAGES: [(&str, &str); 6] = [
         "官方价格",
         "查看 Router 发布的完整官方价格，不受账号池和账号是否存在影响。",
     ),
+    ("我的账户", "注册登录、余额充值、API key 和消费凭据。"),
 ];
 
 impl App {
@@ -244,6 +248,14 @@ impl App {
         self.building_page = None;
         self.build_routing(profile)?;
         self.build_pricing()?;
+        self.building_page = Some(ACCOUNT_PAGE);
+        self.label("管理平台地址", [268, 160, 200, 28], 0)?;
+        let platform = std::fs::read(self.path.parent().unwrap().join("account-platform.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
+            .unwrap_or_else(|| "https://teerouter.org".into());
+        self.edit(ACCOUNT_PLATFORM, &platform, [268, 202, -328, 38], 0, "")?;
+        self.button(OPEN_ACCOUNT, "打开我的账户", [268, 270, 190, 42], 0)?;
         self.building_page = None;
         self.update_summary();
         Ok(())
@@ -297,7 +309,7 @@ impl App {
     }
 
     pub(super) unsafe fn select_page(&mut self, page: usize) {
-        self.page = page.min(PRICE_PAGE);
+        self.page = page.min(ACCOUNT_PAGE);
         self.set(
             REFRESH,
             if self.page == PRICE_PAGE {
