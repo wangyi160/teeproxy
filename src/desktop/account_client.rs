@@ -228,7 +228,11 @@ impl AccountClient {
         }
         result
     }
-    pub async fn load(&self, route: &str) -> std::result::Result<Value, Failure> {
+    pub async fn load(
+        &self,
+        route: &str,
+        include_keys: bool,
+    ) -> std::result::Result<Value, Failure> {
         let me = self.request("GET", "me", json!({}), "").await?;
         if me.pointer("/account/role").and_then(Value::as_str) != Some("user") {
             *self.session.lock().await = Session::default();
@@ -237,7 +241,21 @@ impl AccountClient {
                 message: "请重新使用用户账号登录".into(),
             });
         }
-        let view = if route == "me" {
+        let view = if include_keys {
+            let mut keys = me["keys"].as_array().cloned().unwrap_or_default();
+            for key in &mut keys {
+                let id = key["id"].as_str().unwrap_or("");
+                match self
+                    .request("POST", &format!("keys/{id}/reveal"), json!({}), "")
+                    .await
+                {
+                    Ok(mut value) => key["key"] = value["key"].take(),
+                    Err(error) if error.status == 401 => return Err(error),
+                    Err(error) => key["key_error"] = json!(error.message),
+                }
+            }
+            json!({"data": keys})
+        } else if route == "me" {
             Value::Null
         } else {
             self.request("GET", route, json!({}), "").await?

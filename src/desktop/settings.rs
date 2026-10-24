@@ -135,7 +135,7 @@ pub fn load(path: &Path) -> Result<(Profile, Secrets)> {
     let saved: Saved = serde_json::from_slice(&bytes).context("桌面配置格式无效")?;
     ensure!(saved.version == 1, "不支持的桌面配置版本");
     let plaintext = crypt(&saved.protected_secrets, false)?;
-    let secrets = serde_json::from_slice(&plaintext).context("密钥数据无效")?;
+    let secrets = serde_json::from_slice(&plaintext).context("API key 数据无效")?;
     Ok((saved.profile, secrets))
 }
 pub fn save(path: &Path, profile: &Profile, secrets: &Secrets) -> Result<Profile> {
@@ -158,7 +158,7 @@ fn save_from(
     profile.config(secrets, source_directory)?;
     ensure!(
         secrets.router_key.len() <= 8192 && secrets.client_key.len() <= 256,
-        "密钥过长"
+        "API key 过长"
     );
     let plaintext = Zeroizing::new(serde_json::to_vec(secrets)?);
     let protected_secrets = crypt(&plaintext, true)?.to_vec();
@@ -261,7 +261,7 @@ fn import_policy(value: &str, source: &Path, destination: &Path, kind: &str) -> 
 use std::os::windows::ffi::OsStrExt;
 
 fn crypt(bytes: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>> {
-    ensure!(bytes.len() <= 64 * 1024, "密钥数据过大");
+    ensure!(bytes.len() <= 64 * 1024, "API key 数据过大");
     let input = CRYPT_INTEGER_BLOB {
         cbData: bytes.len() as u32,
         pbData: bytes.as_ptr().cast_mut(),
@@ -293,7 +293,7 @@ fn crypt(bytes: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>> {
     };
     ensure!(
         ok != 0,
-        "Windows 无法读取或加密密钥；请使用原 Windows 用户账户"
+        "Windows 无法读取或加密 API key；请使用原 Windows 用户账户"
     );
     // Copy to a zeroizing buffer, clear decrypted API storage, then free with LocalFree.
     let result = unsafe {

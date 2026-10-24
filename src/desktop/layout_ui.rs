@@ -198,7 +198,7 @@ impl App {
             0,
             "https://router.example.com:8443",
         )?;
-        self.label("业务密钥", [268, 249, 132, 24], 0)?;
+        self.label("Router API key", [268, 249, 144, 24], 0)?;
         self.edit(
             ROUTER_KEY,
             &secrets.router_key,
@@ -208,7 +208,7 @@ impl App {
         )?;
         self.button(
             SHOW_KEYS,
-            "显示密钥",
+            "显示 API key",
             [-166, 246, 106, 26],
             BS_AUTOCHECKBOX as u32,
         )?;

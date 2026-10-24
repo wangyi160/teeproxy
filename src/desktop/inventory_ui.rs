@@ -332,7 +332,7 @@ impl App {
         self.set(
             POOLS_EMPTY,
             if self.catalog_loaded {
-                "没有可见的账号池\r\n\r\n当前业务密钥没有可显示的账号池。"
+                "没有可见的账号池\r\n\r\n当前 Router API key 没有可显示的账号池。"
             } else {
                 "尚未加载账号池\r\n\r\n请完成连接设置，然后点击刷新列表。"
             },

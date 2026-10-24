@@ -108,7 +108,6 @@ pub(super) enum Action {
     Password,
     NewKey,
     Apply,
-    Reveal,
     Revoke,
     Payment,
     CheckPayment,
@@ -329,9 +328,9 @@ impl App {
         self.add(PAGE, w!("STATIC"), "", SS_LEFT, [-250, 184, 210, 24], 2)?;
         self.account_group(start, Group::Table);
         let start = self.controls.len();
-        self.edit(LABEL, "", [260, 238, 210, 38], 0, "密钥名称")?;
+        self.edit(LABEL, "", [260, 238, 210, 38], 0, "API key 名称")?;
         self.button(CREATE_KEY, "创建", [482, 238, 90, 38], 0)?;
-        self.button(APPLY_KEY, "应用所选密钥", [584, 238, 150, 38], 0)?;
+        self.button(APPLY_KEY, "应用 API key", [584, 238, 150, 38], 0)?;
         self.button(REVOKE_KEY, "停用", [746, 238, 90, 38], 0)?;
         self.account_group(start, Group::Panel(Panel::Keys));
         let start = self.controls.len();
@@ -437,7 +436,7 @@ impl App {
         let panel = self.account.panel;
         self.account.task = Some(self.runtime.spawn(async move {
             let result = if action == Action::Load {
-                client.load(&route).await
+                client.load(&route, panel == Panel::Keys).await
             } else {
                 client.request(&method, &route, body, &operation).await
             };
@@ -593,7 +592,7 @@ impl App {
             }
             CREATE_KEY => {
                 let label = self.text(LABEL).trim().to_owned();
-                ensure!(!label.is_empty(), "请填写密钥名称");
+                ensure!(!label.is_empty(), "请填写 API key 名称");
                 operation = self.account_operation(format!("key:{label}"))?;
                 action = Action::NewKey;
                 method = "POST";
@@ -604,7 +603,7 @@ impl App {
                 let row = self.chosen_account_row()?;
                 let key = text(&row["id"]);
                 if id == APPLY_KEY {
-                    ensure!(row["state"] == "enabled", "请等待密钥启用后再应用");
+                    ensure!(row["state"] == "enabled", "请等待 API key 启用后再应用");
                     ensure!(
                         self.task.is_none() && self.inventory_task.is_none(),
                         "请先停止代理，再切换业务 API key"
@@ -615,7 +614,7 @@ impl App {
                 } else {
                     if MessageBoxW(
                         self.hwnd,
-                        wide("停用后，该密钥将无法继续请求模型。确认停用？").as_ptr(),
+                        wide("停用后，该 API key 将无法继续请求模型。确认停用？").as_ptr(),
                         wide("停用 API key").as_ptr(),
                         MB_YESNO | MB_ICONQUESTION,
                     ) != IDYES
@@ -692,11 +691,6 @@ impl App {
             DETAIL => {
                 let row = self.chosen_account_row()?;
                 match self.account.panel {
-                    Panel::Keys => {
-                        action = Action::Reveal;
-                        method = "POST";
-                        route = format!("keys/{}/reveal", text(&row["id"]));
-                    }
                     Panel::Payments => {
                         action = Action::CheckPayment;
                         method = "POST";
@@ -728,10 +722,14 @@ impl App {
         }
         let detail = match self.account.panel {
             Panel::Keys => format!(
-                "名称：{}\r\n状态：{}\r\n前缀：{}\r\n创建时间：{}",
+                "名称：{}\r\n状态：{}\r\nAPI key：{}\r\n创建时间：{}",
                 text(&row["label"]),
                 status(&row["state"]),
-                text(&row["prefix"]),
+                text(
+                    row.get("key")
+                        .filter(|v| !v.is_null())
+                        .unwrap_or(&row["key_error"])
+                ),
                 date(&row["created_at"])
             ),
             Panel::Access => format!(
@@ -759,7 +757,11 @@ impl App {
             ),
         };
         self.set(DETAILS, &detail);
-        self.account.copied = Zeroizing::new(detail);
+        self.account.copied = Zeroizing::new(if self.account.panel == Panel::Keys {
+            row["key"].as_str().unwrap_or("").to_owned()
+        } else {
+            detail
+        });
     }
     unsafe fn show_payment(&mut self, row: Value) {
         let payable = row["state"] == "pending"
@@ -831,7 +833,6 @@ impl App {
             Value::Null
         } else {
             match panel {
-                Panel::Keys => self.account.me["keys"].clone(),
                 Panel::Access => self.account.me["merchants"].clone(),
                 Panel::Journal => self.account.view["journal"]["data"].clone(),
                 _ => self.account.view["data"].clone(),
@@ -839,7 +840,7 @@ impl App {
         };
         self.account.rows = source.as_array().cloned().unwrap_or_default();
         let headings = match panel {
-            Panel::Keys => ["名称", "密钥前缀", "状态", "创建时间", ""],
+            Panel::Keys => ["名称", "API key", "状态", "创建时间", ""],
             Panel::Payments => ["时间", "网络", "付款金额 USDT", "状态", "订单"],
             Panel::Access => ["商户", "状态", "", "", ""],
             Panel::Journal => ["时间", "类型", "金额 USD", "编号", ""],
@@ -848,7 +849,12 @@ impl App {
         for (i, label) in headings.iter().enumerate() {
             let mut label = wide(label);
             let column = LVCOLUMNW {
-                mask: LVCF_TEXT,
+                mask: LVCF_TEXT | LVCF_WIDTH,
+                cx: self.scale(if panel == Panel::Keys {
+                    [120, 180, 80, 150, 0][i]
+                } else {
+                    [180, 180, 150, 125, 120][i]
+                }),
                 pszText: label.as_mut_ptr(),
                 ..mem::zeroed()
             };
@@ -866,7 +872,11 @@ impl App {
             .map(|row| match panel {
                 Panel::Keys => vec![
                     text(&row["label"]),
-                    text(&row["prefix"]),
+                    text(
+                        row.get("key")
+                            .filter(|v| !v.is_null())
+                            .unwrap_or(&row["key_error"]),
+                    ),
                     status(&row["state"]),
                     date(&row["created_at"]),
                     String::new(),
@@ -930,6 +940,23 @@ impl App {
             })
             .collect();
         fill(TABLE.hwnd(self), &rows);
+        if panel == Panel::Keys {
+            SendMessageW(
+                TABLE.hwnd(self),
+                LVM_SETCOLUMNWIDTH,
+                1,
+                LVSCW_AUTOSIZE as isize,
+            );
+            let width = SendMessageW(TABLE.hwnd(self), LVM_GETCOLUMNWIDTH, 1, 0);
+            if width < self.scale(180) as isize {
+                SendMessageW(
+                    TABLE.hwnd(self),
+                    LVM_SETCOLUMNWIDTH,
+                    1,
+                    self.scale(180) as isize,
+                );
+            }
+        }
         self.set(
             PAGE,
             &format!("第 {} 页 · {} 条", self.account.page + 1, rows.len()),
@@ -946,6 +973,8 @@ impl App {
             COPY,
             if panel == Panel::Payments {
                 "复制地址"
+            } else if panel == Panel::Keys {
+                "复制 API key"
             } else {
                 "复制详情"
             },
@@ -1005,11 +1034,7 @@ impl App {
         if (reply.panel != self.account.panel || self.account.refresh_pending)
             && matches!(
                 action,
-                Action::Load
-                    | Action::Reveal
-                    | Action::Receipt
-                    | Action::Payment
-                    | Action::CheckPayment
+                Action::Load | Action::Receipt | Action::Payment | Action::CheckPayment
             )
         {
             if action == Action::Load {
@@ -1096,20 +1121,12 @@ impl App {
                     },
                 );
             }
-            Action::Apply | Action::Reveal => {
+            Action::Apply => {
                 let mut value = value;
                 let key = Zeroizing::new(match value["key"].take() {
                     Value::String(key) => key,
                     _ => String::new(),
                 });
-                if action == Action::Reveal {
-                    self.set(DETAILS, &key);
-                    self.account.copied = key;
-                    self.set(COPY, "复制 API key");
-                    self.set(FEEDBACK, "已显示所选 API key");
-                    self.account_busy();
-                    return;
-                }
                 let result = self.apply_account_key(&key);
                 self.set(
                     FEEDBACK,
@@ -1279,6 +1296,11 @@ mod tests {
             let mock=Router::new()
                 .route("/portal/api/login",post(move ||{let mut v=login.clone();v["csrf"]=json!("fixture-csrf");async move {([("set-cookie","teerouter_portal=fixture; HttpOnly")],Json(v))}}))
                 .route("/portal/api/me",get(move |headers:HeaderMap|{let v=me.clone();async move {assert_eq!(headers["cookie"],"teerouter_portal=fixture");Json(v)}}))
+                .route("/portal/api/keys/k_fixture/reveal",post(|headers:HeaderMap|async move {
+                    assert_eq!(headers["cookie"],"teerouter_portal=fixture");
+                    assert_eq!(headers["x-csrf-token"],"fixture-csrf");
+                    Json(json!({"key":"fixture-full-api-key-with-all-characters"}))
+                }))
                 .route("/portal/api/payments",get(move || {
                     let order = payment_get.lock().unwrap().clone();
                     async move {Json(json!({"data":if order.is_null(){vec![]}else{vec![order]},"has_more":false,"config":{"enabled":true,"channels":[{"id":"tron","name":"TRON"}]}}))}
@@ -1321,6 +1343,31 @@ mod tests {
             complete(&mut app);
             assert_eq!(app.account.rows.len(), 1);
             assert_eq!(app.account.rows[0]["label"], "Laptop");
+            assert_eq!(
+                app.account.rows[0]["key"],
+                "fixture-full-api-key-with-all-characters"
+            );
+            let selection = LVITEMW {
+                stateMask: LVIS_SELECTED,
+                state: LVIS_SELECTED,
+                ..mem::zeroed()
+            };
+            SendMessageW(
+                TABLE.hwnd(&app),
+                LVM_SETITEMSTATE,
+                0,
+                (&selection as *const LVITEMW) as isize,
+            );
+            app.account_selection_changed();
+            assert!(
+                app.text(DETAILS)
+                    .contains("API key：fixture-full-api-key-with-all-characters")
+            );
+            assert_eq!(
+                app.account.copied.as_str(),
+                "fixture-full-api-key-with-all-characters"
+            );
+            assert_eq!(app.text(COPY), "复制 API key");
             assert!(!app.account.visible(PAY.hwnd(&app)));
             // Switch before the previous fetch completes. Its key list must not
             // be rendered under the payments heading when the response arrives.

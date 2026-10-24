@@ -116,7 +116,7 @@ pub(crate) async fn fetch_verified(
         let attempt = client::verify(router, trust).await;
         let mut session = attempt
             .session
-            .context("TEE 验证未通过，未发送密钥或读取列表")?;
+            .context("TEE 验证未通过，未发送 API key 或读取列表")?;
         let mut values = Vec::new();
         for path in ["/v1/models", "/v1/pools"] {
             let response = session.send("GET", path, key, String::new()).await?;

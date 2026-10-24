@@ -622,7 +622,7 @@ impl App {
             SAVE => {
                 let (profile, secrets) = self.snapshot()?;
                 self.save_profile(&profile, &secrets)?;
-                self.append("配置已保存，密钥已使用当前 Windows 用户加密。");
+                self.append("配置已保存，API key 已使用当前 Windows 用户加密。");
                 self.update_route_summary();
                 self.status(
                     if self.running {
@@ -1186,7 +1186,7 @@ fn redact(message: &str, secrets: &Secrets) -> String {
     let mut result = message.to_owned();
     for secret in [&secrets.router_key, &secrets.client_key] {
         if !secret.is_empty() {
-            result = result.replace(secret, "[密钥]");
+            result = result.replace(secret, "[API key]");
         }
     }
     result
