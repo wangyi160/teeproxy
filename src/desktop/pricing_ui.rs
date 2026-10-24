@@ -194,10 +194,7 @@ impl App {
             return Ok(());
         }
         let (profile, secrets) = self.snapshot()?;
-        ensure!(
-            !secrets.router_key.is_empty(),
-            "请先在连接设置填写 Router key"
-        );
+        ensure!(!secrets.router_key.is_empty(), "请先登录账户并等待连接就绪");
         let config = profile.config(&secrets, self.path.parent().unwrap())?;
         self.inventory_generation += 1;
         self.inventory_finished_observed = false;

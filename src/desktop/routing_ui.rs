@@ -244,7 +244,11 @@ impl App {
             );
         }
         // Persist first: invalid input or a failed disk write never changes live rules.
-        let saved = settings::save(&self.path, profile, secrets)?;
+        let local = Secrets {
+            router_key: String::new(),
+            client_key: secrets.client_key.clone(),
+        };
+        let saved = settings::save(&self.path, profile, &local)?;
         self.set(TDX, &saved.tdx_policy);
         self.set(SNP, &saved.snp_policy);
         if let Some(proxy) = &self.live_proxy {

@@ -332,7 +332,7 @@ impl App {
         self.set(
             POOLS_EMPTY,
             if self.catalog_loaded {
-                "没有可见的账号池\r\n\r\n当前 Router API key 没有可显示的账号池。"
+                "没有可见的账号池\r\n\r\n登录后显示当前账户可用的账号池。"
             } else {
                 "尚未加载账号池\r\n\r\n请完成连接设置，然后点击刷新列表。"
             },
@@ -497,10 +497,7 @@ impl App {
         }
         let (profile, secrets) = self.snapshot()?;
         let config = profile.config(&secrets, self.path.parent().unwrap())?;
-        ensure!(
-            !secrets.router_key.is_empty(),
-            "请先在连接设置填写 Router key"
-        );
+        ensure!(!secrets.router_key.is_empty(), "请先登录账户并等待连接就绪");
         self.inventory_generation += 1;
         self.inventory_refreshed = std::time::Instant::now();
         self.inventory_finished_observed = false;
@@ -1000,6 +997,7 @@ mod tests {
             UnregisterClassW(class.lpszClassName, class.hInstance);
         }
         std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(directory.join("account-platform.json")).unwrap();
         std::fs::remove_dir(directory).unwrap();
     }
 }

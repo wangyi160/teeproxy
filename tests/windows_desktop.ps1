@@ -1,4 +1,4 @@
-param([string]$Binary = "$PSScriptRoot/../target/release/teeproxy.exe", [switch]$Portable)
+﻿param([string]$Binary = "$PSScriptRoot/../target/release/teeproxy.exe", [switch]$Portable)
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 using System;
@@ -95,10 +95,10 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(501,502,503,504,505,506,507,508,509,510,511,512,513,559,560,1511,1512,1513,1514,1515,1516,1522,1543,302,303,304,307,310,312,313,314,315,316,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
+    foreach ($id in @(501,502,503,504,505,506,507,508,509,510,559,560,1511,1512,1513,1514,1515,1516,1522,1543,302,303,304,307,310,312,313,314,315,316,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
-    foreach ($id in @(104,309,311,514,603,604,608,1510,1517,1536)) {
+    foreach ($id in @(102,104,208,309,311,511,512,513,514,603,604,608,1510,1517,1525,1526,1527,1528,1536)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -ne [IntPtr]::Zero) { throw "Removed routing control $id still exists" }
     }
     if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,605))) { throw 'Fixed pool maximum is disabled' }
@@ -117,7 +117,7 @@ try {
     $identityTitle = Read-Control 559
     $accountTitles = [Collections.Generic.HashSet[string]]::new()
     [void]$accountTitles.Add($identityTitle)
-    foreach ($page in 7..12) {
+    foreach ($page in 7..8) {
         Select-Page $page
         if (-not $accountTitles.Add((Read-Control 559))) { throw 'Account sidebar reused another page title' }
         if (-not (Control-Shown 1543) -or (Control-Shown 1512) -or (Control-Shown 1522)) { throw 'Logged-out account page displayed private data or the identity form' }
@@ -137,7 +137,6 @@ try {
     if ([TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,606))) { throw 'Automatic fields enabled in fixed-pool mode' }
     Select-Page 2
     Set-Control 101 'https://127.0.0.1:1'
-    Set-Control 102 'desktop-smoke-key-not-a-real-credential'
     Set-Control 103 $testPort
     if ((Read-Control 111) -ne '127.0.0.1') { throw 'Default listener is not loopback' }
     Set-Control 111 '0.0.0.0'
@@ -183,15 +182,9 @@ try {
     Open-TestWindow
     if ((Read-Control 101) -ne 'https://127.0.0.1:1' -or (Read-Control 103) -ne "$testPort") { throw 'Saved address/port did not restore' }
     if ((Read-Control 111) -ne '0.0.0.0') { throw 'Saved bind IP did not restore' }
-    # The Agent API key is restored visibly; the Router business key stays masked.
+    # Only the local Agent API key is exposed as a form field.
     if ((Read-Control 107) -ne 'desktop-local-client-key-for-test') { throw 'Saved API key did not restore visibly' }
     if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,107),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]::Zero) { throw 'Agent API key is masked after reopening' }
-    if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,102),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -eq [IntPtr]::Zero) { throw 'Key control is not masked' }
-    foreach ($checked in @(1,0)) {
-        [void][TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,208),0x00F1,[IntPtr]$checked,[IntPtr]::Zero)
-        Click-Control 208
-        if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,107),0x00D2,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]::Zero) { throw 'Router key toggle hid the Agent API key' }
-    }
     Click-Control 202
     Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,202)) }
     if (-not (Read-Control 110).Contains('failed')) { throw 'Verification failure was not displayed' }
@@ -200,20 +193,13 @@ try {
     Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,307)) }
     if ([TeeproxyUi]::Send([TeeproxyUi]::GetDlgItem($script:window,302),0x1004,[IntPtr]::Zero,[IntPtr]::Zero) -ne [IntPtr]::Zero) { throw 'Unverified inventory displayed' }
     Click-Control 203
-    Wait-Until { (Read-Control 110).Contains("http://127.0.0.1:$testPort/v1") }
-    if ([TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,101))) { throw 'Upstream editable while running' }
-    Select-Page 4
-    foreach ($id in @(601,605,607)) {
-        if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,$id))) { throw "Routing control $id disabled while running" }
-    }
-    Set-Control 605 '0.5'
-    if (-not (Read-Control 609).StartsWith((-join [char[]]@(0x672a,0x4fdd,0x5b58)))) { throw 'Unsaved rule was not identified' }
-    Click-Control 607
-    Wait-Until { (Read-Control 609).StartsWith((-join [char[]]@(0x5df2,0x751f,0x6548))) }
-    $liveSaved = [IO.File]::ReadAllText($settingsFile) | ConvertFrom-Json
-    if ($liveSaved.profile.routing.max_multiplier_millionths -ne 500000) { throw 'Live rule not saved' }
-    if ((Read-Control 203) -ne (-join [char[]]@(0x505c,0x6b62,0x4ee3,0x7406))) { throw 'Saving routing stopped the proxy' }
-    if (-not (Read-Control 109).StartsWith((-join [char[]]@(0x914d,0x7f6e,0x5df2,0x4fdd,0x5b58)))) { throw 'Live route save did not show confirmation' }
+    if ((Read-Control 110).Contains("http://127.0.0.1:$testPort/v1")) { throw 'Signed-out proxy started' }
+    $listeners = @(Get-NetTCPConnection -State Listen -OwningProcess $script:appProcess.Id -ErrorAction SilentlyContinue)
+    if ($listeners.Count) { throw 'Signed-out proxy opened a listener' }
+    Select-Page 9
+    if (-not (Control-Shown 1511) -or -not (Control-Shown 105) -or (Control-Shown 107)) { throw 'Connection settings mixed with local Agent settings' }
+    Select-Page 2
+    if (-not (Control-Shown 107) -or (Control-Shown 101) -or (Control-Shown 1511)) { throw 'Local Agent settings mixed with account identity' }
     # Exercise the actual notification-area callback, minimize, and close behavior.
     [void][TeeproxyUi]::Send($script:window,0x8011,[IntPtr]::Zero,[IntPtr]0x0400)
     Wait-Until { [TeeproxyUi]::IsWindowVisible($script:window) }
@@ -225,42 +211,8 @@ try {
     [void][TeeproxyUi]::Send($script:window,0x0010,[IntPtr]::Zero,[IntPtr]::Zero)
     Wait-Until { -not [TeeproxyUi]::IsWindowVisible($script:window) }
     if ($script:appProcess.HasExited) { throw 'Closing the window exited the gateway' }
-    Add-Type -AssemblyName System.Net.Http
-    $handler = [Net.Http.HttpClientHandler]::new(); $handler.UseProxy=$false
-    $client = [Net.Http.HttpClient]::new($handler)
-    try {
-        $response = $client.GetAsync("http://127.0.0.1:$testPort/v1/models").GetAwaiter().GetResult()
-        if ([int]$response.StatusCode -ne 401) { throw 'Wildcard listener accepted missing client key' }
-        $response.Dispose()
-        $client.DefaultRequestHeaders.Authorization = [Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer','desktop-local-client-key-for-test')
-        $response = $client.GetAsync("http://127.0.0.1:$testPort/v1/models").GetAwaiter().GetResult()
-        if ([int]$response.StatusCode -ne 502) { throw 'Unverified upstream accepted' }
-        $response.Dispose()
-        $localNetworkIP = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.AddressState -eq 'Preferred' -and $_.IPAddress -notmatch '^(127\.|169\.254\.|198\.18\.)' } | Select-Object -First 1 -ExpandProperty IPAddress
-        if ($localNetworkIP) {
-            $response = $client.GetAsync("http://${localNetworkIP}:$testPort/v1/models").GetAwaiter().GetResult()
-            if ([int]$response.StatusCode -ne 502) { throw 'Authenticated network client did not reach the TEE check' }
-            $response.Dispose()
-            $request = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::Get,"http://${localNetworkIP}:$testPort/v1/models")
-            $request.Headers.Host = "localhost:$testPort"
-            $response = $client.SendAsync($request).GetAwaiter().GetResult()
-            if ([int]$response.StatusCode -ne 400) { throw 'Network listener accepted a mismatched localhost Host' }
-            $response.Dispose();$request.Dispose()
-        }
-    } finally { $client.Dispose(); $handler.Dispose() }
-    Click-Control 203
-    Wait-Until { [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,202)) }
-    $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$testPort)
-    $portProbe.Start(); $portProbe.Stop()
-    if ((Read-Control 110).Contains('desktop-smoke-key-not-a-real-credential')) { throw 'Key leaked to operation log' }
     Close-TestWindow
-    Open-TestWindow
-    Click-Control 203
-    Wait-Until { (Read-Control 110).Contains("http://127.0.0.1:$testPort/v1") }
-    Close-TestWindow
-    $portProbe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,$testPort)
-    $portProbe.Start(); $portProbe.Stop()
-    'Native desktop smoke passed: sidebar pages, save/reopen, live routing edits, masked key, inventory/verification failure, tray restore/minimize/close, background API, stop/exit listener cleanup'
+    'Native desktop smoke passed: redesigned pages, native login, local-only API key, portable save/reopen, signed-out proxy denied, trust settings and tray lifecycle'
     if ($Portable) { 'Portable desktop passed: executable-relative data, external policy import, folder move, encrypted credentials restored, no AppData writes' }
 } finally {
     try { Close-TestWindow } finally { $env:LOCALAPPDATA = $previousLocalAppData }

@@ -111,7 +111,7 @@ pub(crate) async fn fetch_verified(
     trust: &client::Trust,
     key: &str,
 ) -> Result<Catalog> {
-    ensure!(!key.is_empty(), "请填写 Router key 后刷新列表");
+    ensure!(!key.is_empty(), "请先登录账户并等待连接就绪");
     tokio::time::timeout(Duration::from_secs(90), async {
         let attempt = client::verify(router, trust).await;
         let mut session = attempt

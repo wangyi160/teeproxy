@@ -20,35 +20,23 @@ pub(super) const LOG_PAGE: usize = 3;
 pub(super) const ROUTE_PAGE: usize = 4;
 pub(super) const PRICE_PAGE: usize = 5;
 pub(super) const ACCOUNT_PAGE: usize = 6;
-pub(super) const KEYS_PAGE: usize = 7;
-pub(super) const PAYMENTS_PAGE: usize = 8;
-pub(super) const FINANCE_PAGE: usize = 9;
-pub(super) const RECEIPTS_PAGE: usize = 10;
-pub(super) const SECURITY_PAGE: usize = 11;
-pub(super) const JOURNAL_PAGE: usize = 12;
+pub(super) const PAYMENTS_PAGE: usize = 7;
+pub(super) const FINANCE_PAGE: usize = 8;
+pub(super) const TRUST_PAGE: usize = 9;
 pub(super) fn is_account_page(page: usize) -> bool {
-    (ACCOUNT_PAGE..=JOURNAL_PAGE).contains(&page)
+    (ACCOUNT_PAGE..=FINANCE_PAGE).contains(&page)
 }
-const PAGES: [(&str, &str); 13] = [
-    ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
-    (
-        "账号与模型",
-        "选择上方账号池，下方联动显示账号与模型；点击使用后切换路由。",
-    ),
-    ("连接设置", "配置上游 Router 与本地代理服务。"),
-    ("运行记录", "查看连接验证、列表刷新和代理运行的详细记录。"),
-    ("路由策略", "设置账号池与倍率上限，模型跟随 Agent 请求。"),
-    (
-        "官方价格",
-        "查看 Router 发布的完整官方价格，不受账号池和账号是否存在影响。",
-    ),
-    ("登录与身份", ""),
-    ("API key", ""),
+const PAGES: [(&str, &str); 10] = [
+    ("概览", ""),
+    ("账号池与模型", ""),
+    ("Agent 接入", ""),
+    ("运行记录", ""),
+    ("路由策略", ""),
+    ("模型价格", ""),
+    ("我的账户", ""),
     ("余额与充值", ""),
     ("消费明细", ""),
-    ("消费凭据", ""),
-    ("账号安全", ""),
-    ("资金记录", ""),
+    ("连接与验证", ""),
 ];
 
 impl App {
@@ -60,8 +48,9 @@ impl App {
         self.building_page = None;
         self.label("teeproxy", [64, 27, 130, 30], 3)?;
         self.label("安全连接 · 本地代理", [24, 68, 172, 22], 2)?;
-        self.label("代理", [32, 104, 144, 20], 2)?;
-        self.label("账户", [32, 344, 144, 20], 2)?;
+        self.label("本地代理", [32, 104, 144, 20], 2)?;
+        self.label("平台账户", [32, 344, 144, 20], 2)?;
+        self.label("设置", [32, 496, 144, 20], 2)?;
         for (page, (title, _)) in PAGES.iter().enumerate() {
             self.button(
                 NAV_FIRST + page as u16,
@@ -70,6 +59,8 @@ impl App {
                     16,
                     if page < ACCOUNT_PAGE {
                         128 + page as i32 * 34
+                    } else if page == TRUST_PAGE {
+                        524
                     } else {
                         370 + (page - ACCOUNT_PAGE) as i32 * 34
                     },
@@ -165,7 +156,7 @@ impl App {
             [268, 432, -316, 22],
             2,
         )?;
-        self.button(OPEN_SETTINGS, "连接设置", [-192, 336, 132, 38], 0)?;
+        self.button(OPEN_SETTINGS, "Agent 接入", [-192, 336, 132, 38], 0)?;
         self.label("池内模型总数", [268, 518, 220, 24], 2)?;
         self.add(
             MODEL_COUNT,
@@ -187,74 +178,40 @@ impl App {
 
         self.build_inventory()?;
         self.building_page = Some(SETTINGS_PAGE);
-        self.label("上游 Router", [268, 142, 400, 26], 3)?;
-        self.label("Router 地址", [268, 195, 132, 24], 0)?;
-        self.edit(
-            ROUTER,
-            &profile.router,
-            [412, 186, -472, 38],
-            0,
-            "https://router.example.com:8443",
-        )?;
-        self.label("Router API key", [268, 249, 144, 24], 0)?;
-        self.edit(
-            ROUTER_KEY,
-            &secrets.router_key,
-            [412, 240, -596, 38],
-            ES_PASSWORD as u32,
-            "填写 Router key",
-        )?;
-        self.button(
-            SHOW_KEYS,
-            "显示 API key",
-            [-166, 246, 106, 26],
-            BS_AUTOCHECKBOX as u32,
-        )?;
-        self.label("TDX 批准策略", [268, 303, 136, 24], 0)?;
-        self.edit(
-            TDX,
-            &profile.tdx_policy,
-            [412, 294, -584, 38],
-            0,
-            "选择批准策略文件",
-        )?;
-        self.button(BROWSE_TDX, "选择文件", [-156, 294, 96, 38], 0)?;
-        self.label("SNP 批准策略", [268, 357, 136, 24], 0)?;
-        self.edit(
-            SNP,
-            &profile.snp_policy,
-            [412, 348, -584, 38],
-            0,
-            "使用 AMD SEV-SNP 时填写",
-        )?;
-        self.button(BROWSE_SNP, "选择文件", [-156, 348, 96, 38], 0)?;
-        self.label(
-            "按 Router 的运行环境选择 TDX 或 SNP 策略。",
-            [412, 402, -472, 22],
-            2,
-        )?;
-
-        self.label("本地服务", [268, 468, 400, 26], 3)?;
-        self.label("监听 IP", [268, 520, 132, 24], 0)?;
-        self.edit(
-            LISTEN_IP,
-            &profile.listen_ip,
-            [412, 511, -664, 38],
-            0,
-            "127.0.0.1 或 0.0.0.0",
-        )?;
-        self.label("端口", [-236, 520, 64, 24], 0)?;
+        self.label("本地服务", [268, 150, 400, 26], 3)?;
+        self.label("监听 IP", [268, 214, 132, 24], 0)?;
+        self.edit(LISTEN_IP, &profile.listen_ip, [412, 204, -664, 40], 0, "")?;
+        self.label("端口", [-236, 214, 64, 24], 0)?;
         self.edit(
             PORT,
             &profile.port.to_string(),
-            [-156, 511, 96, 38],
+            [-156, 204, 96, 40],
             ES_NUMBER as u32,
-            "8899",
+            "",
         )?;
-        self.label("API key", [268, 574, 132, 24], 0)?;
-        self.edit(CLIENT_KEY, &secrets.client_key, [412, 565, -472, 38], 0, "")?;
-        self.button(SAVE, "保存设置", [244, 636, 132, 38], 0)?;
-        self.button(VERIFY, "验证连接", [392, 636, 132, 38], 0)?;
+        self.label("API key", [268, 284, 132, 24], 0)?;
+        self.edit(CLIENT_KEY, &secrets.client_key, [412, 274, -472, 40], 0, "")?;
+        self.button(GENERATE_KEY, "生成 API key", [412, 334, 160, 38], 0)?;
+        self.button(COPY_KEY, "复制 API key", [584, 334, 160, 38], 0)?;
+        self.button(SAVE, "保存", [268, 422, 132, 40], 0)?;
+
+        self.building_page = Some(TRUST_PAGE);
+        self.label("平台地址", [268, 160, 140, 24], 0)?;
+        let platform = std::fs::read(self.path.parent().unwrap().join("account-platform.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<String>(&b).ok())
+            .unwrap_or_else(|| "https://teerouter.org".into());
+        self.edit(account_ui::PLATFORM, &platform, [420, 150, -480, 40], 0, "")?;
+        self.label("Router 地址", [268, 228, 140, 24], 0)?;
+        self.edit(ROUTER, &profile.router, [420, 218, -480, 40], 0, "")?;
+        self.label("TDX 信任策略", [268, 314, 140, 24], 0)?;
+        self.edit(TDX, &profile.tdx_policy, [420, 304, -592, 40], 0, "")?;
+        self.button(BROWSE_TDX, "浏览文件", [-156, 304, 96, 40], 0)?;
+        self.label("SNP 信任策略", [268, 382, 140, 24], 0)?;
+        self.edit(SNP, &profile.snp_policy, [420, 372, -592, 40], 0, "")?;
+        self.button(BROWSE_SNP, "浏览文件", [-156, 372, 96, 40], 0)?;
+        self.button(SAVE_TRUST, "保存", [268, 456, 132, 40], 0)?;
+        self.button(VERIFY, "验证连接", [416, 456, 132, 40], 0)?;
 
         self.building_page = Some(LOG_PAGE);
         self.add(
@@ -413,7 +370,8 @@ impl App {
                 [244, 320, -280, 160],
                 [244, 496, -280, 116],
             ],
-            SETTINGS_PAGE => vec![[244, 120, -280, 316], [244, 448, -280, 166]],
+            SETTINGS_PAGE => vec![[244, 128, -280, 268]],
+            TRUST_PAGE => vec![[244, 128, -280, 300]],
             INVENTORY_PAGE => inventory_cards(width, height).to_vec(),
             LOG_PAGE => vec![[244, 128, -280, -184]],
             ROUTE_PAGE => vec![[244, 128, -280, 382], [244, 572, -280, 42]],
@@ -473,10 +431,10 @@ impl App {
         let saved = SaveDC(dc);
         let id = item.CtlID as u16;
         let nav = (NAV_FIRST..=NAV_LAST).contains(&id);
-        let active = nav && (id - NAV_FIRST) as usize == self.page;
+        let active = (nav && (id - NAV_FIRST) as usize == self.page) || self.account.active_tab(id);
         let disabled = item.itemState & ODS_DISABLED != 0;
         let pressed = item.itemState & ODS_SELECTED != 0;
-        let primary = matches!(id, START | SAVE);
+        let primary = matches!(id, START | SAVE | SAVE_TRUST | 1515 | 1531 | 1539);
         let color = if disabled {
             rgb(153, 163, 178)
         } else if active {
@@ -515,7 +473,7 @@ impl App {
         let flags = if nav {
             let symbols: [&str; PAGES.len()] = [
                 "\u{e80f}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}", "\u{e77b}",
-                "\u{e192}", "\u{e8c7}", "\u{e9d9}", "\u{e8a5}", "\u{e72e}", "\u{e81c}",
+                "\u{e8c7}", "\u{e9d9}", "\u{e72e}",
             ];
             let mut icon = rect;
             icon.left += self.scale(16);

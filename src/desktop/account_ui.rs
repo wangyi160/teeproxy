@@ -13,15 +13,10 @@ const SUBMIT: u16 = 1515;
 const SWITCH: u16 = 1516;
 const IDENTITY: u16 = 1518;
 const LOGOUT: u16 = 1519;
-const RELOAD: u16 = 1520;
 const SUMMARY: u16 = 1521;
 pub(super) const TABLE: u16 = 1522;
 const DETAILS: u16 = 1523;
 const FEEDBACK: u16 = 1524;
-const LABEL: u16 = 1525;
-const CREATE_KEY: u16 = 1526;
-const APPLY_KEY: u16 = 1527;
-const REVOKE_KEY: u16 = 1528;
 const NETWORK: u16 = 1529;
 const AMOUNT: u16 = 1530;
 const PAY: u16 = 1531;
@@ -36,27 +31,25 @@ const COPY_AMOUNT: u16 = 1540;
 const PAGE: u16 = 1541;
 const BALANCE: u16 = 1542;
 const GO_LOGIN: u16 = 1543;
+const PAYMENT_TAB: u16 = 1544;
+const JOURNAL_TAB: u16 = 1545;
+const ACCOUNT_NAME: u16 = 1546;
+const CONNECTION_STATE: u16 = 1547;
+const USAGE_SUMMARY: u16 = 1548;
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(super) enum Panel {
     #[default]
     Overview,
-    Keys,
     Payments,
     Finance,
-    Receipts,
-    Security,
     Journal,
 }
 impl Panel {
     fn for_page(page: usize) -> Self {
         match page {
-            KEYS_PAGE => Self::Keys,
             PAYMENTS_PAGE => Self::Payments,
             FINANCE_PAGE => Self::Finance,
-            RECEIPTS_PAGE => Self::Receipts,
-            SECURITY_PAGE => Self::Security,
-            JOURNAL_PAGE => Self::Journal,
             _ => Self::Overview,
         }
     }
@@ -72,18 +65,11 @@ impl Panel {
             Self::Finance | Self::Journal => {
                 format!("finance?offset={offset}&journal_offset={offset}")
             }
-            Self::Receipts => {
-                if cursor.is_empty() {
-                    "receipts/mine".into()
-                } else {
-                    format!("receipts/mine?before={cursor}")
-                }
-            }
             _ => "me".into(),
         }
     }
     fn has_table(self) -> bool {
-        !matches!(self, Self::Overview | Self::Security)
+        self != Self::Overview
     }
 }
 #[derive(Clone, Copy)]
@@ -95,6 +81,7 @@ enum Group {
     Member,
     Panel(Panel),
     Table,
+    Wallet,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
@@ -103,9 +90,7 @@ pub(super) enum Action {
     Register,
     Logout,
     Password,
-    NewKey,
-    Apply,
-    Revoke,
+    Bind,
     Payment,
     CheckPayment,
     Receipt,
@@ -116,6 +101,7 @@ pub(super) struct Reply {
     page: usize,
     cursor: String,
     pub result: std::result::Result<Value, Failure>,
+    session: Zeroizing<Vec<u8>>,
 }
 pub(super) struct State {
     client: Option<Arc<AccountClient>>,
@@ -135,6 +121,11 @@ pub(super) struct State {
     attempt: Option<(String, String)>,
     refreshed: std::time::Instant,
     refresh_pending: bool,
+    connection_id: String,
+    connection_ready: bool,
+    session: Zeroizing<Vec<u8>>,
+    bind_retry: bool,
+    connection_problem: String,
 }
 impl Default for State {
     fn default() -> Self {
@@ -156,10 +147,25 @@ impl Default for State {
             attempt: None,
             refreshed: std::time::Instant::now(),
             refresh_pending: false,
+            connection_id: String::new(),
+            connection_ready: false,
+            session: Zeroizing::new(Vec::new()),
+            bind_retry: false,
+            connection_problem: String::new(),
         }
     }
 }
 impl State {
+    pub fn connection_ready(&self) -> bool {
+        self.connection_ready
+    }
+    pub fn active_tab(&self, id: u16) -> bool {
+        self.logged_in()
+            && matches!(
+                (id, self.panel),
+                (PAYMENT_TAB, Panel::Payments) | (JOURNAL_TAB, Panel::Journal)
+            )
+    }
     pub fn logged_in(&self) -> bool {
         self.me.pointer("/account/role").and_then(Value::as_str) == Some("user")
     }
@@ -174,6 +180,11 @@ impl State {
         self.page = 0;
         self.cursors = vec![String::new()];
         self.refresh_pending = false;
+        self.connection_id.clear();
+        self.connection_ready = false;
+        self.session.clear();
+        self.bind_retry = false;
+        self.connection_problem.clear();
     }
     pub fn visible(&self, hwnd: HWND) -> bool {
         let logged = self.logged_in();
@@ -184,6 +195,7 @@ impl State {
             Some(Group::Member) => logged,
             Some(Group::Panel(panel)) => logged && self.panel == *panel,
             Some(Group::Table) => logged && self.panel.has_table(),
+            Some(Group::Wallet) => logged && matches!(self.panel, Panel::Payments | Panel::Journal),
             _ => true,
         }
     }
@@ -259,41 +271,47 @@ impl App {
         self.add(FEEDBACK, w!("STATIC"), "", SS_LEFT, [260, -75, -312, 42], 2)?;
         self.account_group(start, Group::Always);
         let start = self.controls.len();
-        let platform = std::fs::read(self.path.parent().unwrap().join("account-platform.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<String>(&b).ok())
-            .unwrap_or_else(|| "https://teerouter.org".into());
-        self.label("管理平台", [268, 148, 150, 24], 0)?;
-        self.edit(PLATFORM, &platform, [268, 178, 460, 40], 0, "")?;
-        self.label("用户名", [268, 238, 150, 24], 0)?;
-        self.edit(USERNAME, "", [268, 268, 460, 40], 0, "")?;
-        self.label("密码", [268, 328, 150, 24], 0)?;
-        self.edit(PASSWORD, "", [268, 358, 460, 40], ES_PASSWORD as u32, "")?;
-        self.button(SUBMIT, "登录", [268, 530, 160, 40], 0)?;
-        self.button(SWITCH, "注册新账号", [448, 530, 180, 40], 0)?;
+        self.label("用户名", [300, 180, 150, 24], 0)?;
+        self.edit(USERNAME, "", [300, 214, 460, 42], 0, "")?;
+        self.label("密码", [300, 282, 150, 24], 0)?;
+        self.edit(PASSWORD, "", [300, 316, 460, 42], ES_PASSWORD as u32, "")?;
+        self.button(SUBMIT, "登录", [300, 496, 160, 42], 0)?;
+        self.button(SWITCH, "注册新账号", [480, 496, 180, 42], 0)?;
         self.account_group(start, Group::Guest);
         let start = self.controls.len();
-        self.label("名称", [268, 418, 150, 24], 0)?;
-        self.edit(NAME, "", [268, 448, 460, 40], 0, "")?;
+        self.label("名称", [300, 384, 150, 24], 0)?;
+        self.edit(NAME, "", [300, 418, 460, 42], 0, "")?;
         self.account_group(start, Group::Register);
         let start = self.controls.len();
         self.add(IDENTITY, w!("STATIC"), "", SS_LEFT, [260, 134, -590, 28], 3)?;
-        self.button(RELOAD, "刷新", [-240, 128, 88, 36], 0)?;
-        self.button(LOGOUT, "退出登录", [-140, 128, 104, 36], 0)?;
+
         self.account_group(start, Group::Member);
         let start = self.controls.len();
         self.label("请先登录", [268, 210, 300, 28], 3)?;
         self.button(GO_LOGIN, "前往登录", [268, 264, 150, 40], 0)?;
         self.account_group(start, Group::Locked);
         let start = self.controls.len();
+        self.label("用户名", [268, 210, 132, 24], 0)?;
+        self.add(SUMMARY, w!("STATIC"), "", SS_LEFT, [420, 210, -480, 28], 3)?;
+        self.label("名称", [268, 262, 132, 24], 0)?;
         self.add(
-            SUMMARY,
-            w!("EDIT"),
+            ACCOUNT_NAME,
+            w!("STATIC"),
             "",
-            ES_MULTILINE as u32 | ES_READONLY as u32,
-            [268, 250, -328, 300],
-            3,
+            SS_LEFT,
+            [420, 262, -480, 26],
+            0,
         )?;
+        self.label("连接状态", [268, 314, 132, 24], 0)?;
+        self.add(
+            CONNECTION_STATE,
+            w!("STATIC"),
+            "",
+            SS_LEFT,
+            [420, 314, -480, 26],
+            0,
+        )?;
+        self.button(LOGOUT, "退出登录", [268, 370, 132, 38], 0)?;
         self.account_group(start, Group::Panel(Panel::Overview));
         let start = self.controls.len();
         self.table(
@@ -304,7 +322,7 @@ impl App {
             .iter_mut()
             .find(|c| c.id == TABLE)
             .unwrap()
-            .rect = [260, 290, -312, -555];
+            .rect = [260, 320, -312, -585];
         self.add(
             DETAILS,
             w!("EDIT"),
@@ -324,45 +342,54 @@ impl App {
         self.add(PAGE, w!("STATIC"), "", SS_LEFT, [-250, 184, 210, 24], 2)?;
         self.account_group(start, Group::Table);
         let start = self.controls.len();
-        self.edit(LABEL, "", [260, 238, 210, 38], 0, "API key 名称")?;
-        self.button(CREATE_KEY, "创建", [482, 238, 90, 38], 0)?;
-        self.button(APPLY_KEY, "应用 API key", [584, 238, 150, 38], 0)?;
-        self.button(REVOKE_KEY, "停用", [746, 238, 90, 38], 0)?;
-        self.account_group(start, Group::Panel(Panel::Keys));
+        self.button(PAYMENT_TAB, "充值订单", [260, 258, 124, 38], 0)?;
+        self.button(JOURNAL_TAB, "余额变动", [396, 258, 124, 38], 0)?;
+        self.account_group(start, Group::Wallet);
         let start = self.controls.len();
         self.add(BALANCE, w!("STATIC"), "", SS_LEFT, [260, 184, -590, 28], 3)?;
+        self.account_group(start, Group::Wallet);
+        let start = self.controls.len();
         self.add(
             NETWORK,
             w!("COMBOBOX"),
             "",
             WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
-            [260, 238, 180, 250],
+            [260, 218, 180, 250],
             0,
         )?;
-        self.edit(AMOUNT, "10", [452, 232, 150, 38], 0, "USDT 金额")?;
-        self.button(PAY, "创建充值订单", [614, 232, 150, 38], 0)?;
+        self.edit(AMOUNT, "10", [452, 212, 150, 38], 0, "USDT 金额")?;
+        self.button(PAY, "创建充值订单", [614, 212, 150, 38], 0)?;
         self.button(COPY_AMOUNT, "复制付款金额", [492, -122, 150, 34], 0)?;
         self.account_group(start, Group::Panel(Panel::Payments));
         let start = self.controls.len();
-        self.label("当前密码", [268, 250, 160, 24], 0)?;
-        self.edit(CURRENT, "", [268, 282, 460, 40], ES_PASSWORD as u32, "")?;
-        self.label("新密码", [268, 350, 160, 24], 0)?;
+        self.label("当前密码", [268, 466, 132, 24], 0)?;
+        self.edit(CURRENT, "", [420, 456, -480, 40], ES_PASSWORD as u32, "")?;
+        self.label("新密码", [268, 524, 132, 24], 0)?;
         self.edit(
             NEW_PASSWORD,
             "",
-            [268, 382, 460, 40],
+            [420, 514, -480, 40],
             ES_PASSWORD as u32,
             "",
         )?;
-        self.button(CHANGE_PASSWORD, "修改密码", [268, 460, 160, 40], 0)?;
-        self.account_group(start, Group::Panel(Panel::Security));
+        self.button(CHANGE_PASSWORD, "修改密码", [420, 576, 160, 40], 0)?;
+        self.account_group(start, Group::Panel(Panel::Overview));
+        let start = self.controls.len();
+        self.add(
+            USAGE_SUMMARY,
+            w!("STATIC"),
+            "",
+            SS_LEFT,
+            [260, 218, -312, 60],
+            3,
+        )?;
+        self.account_group(start, Group::Panel(Panel::Finance));
         for (id, max) in [
             (USERNAME, 64),
             (PASSWORD, 512),
             (NAME, 128),
             (CURRENT, 512),
             (NEW_PASSWORD, 512),
-            (LABEL, 128),
             (AMOUNT, 20),
         ] {
             SendMessageW(self.by_id[&id], EM_SETLIMITTEXT, max, 0);
@@ -395,7 +422,11 @@ impl App {
         }
     }
     pub(super) unsafe fn account_page_entered(&mut self) {
-        self.account.panel = Panel::for_page(self.page);
+        self.account.panel = if self.page == PAYMENTS_PAGE && self.account.panel == Panel::Journal {
+            Panel::Journal
+        } else {
+            Panel::for_page(self.page)
+        };
         self.account.page = 0;
         self.account.cursors = vec![String::new()];
         self.account.view = Value::Null;
@@ -429,7 +460,7 @@ impl App {
         let panel = self.account.panel;
         self.account.task = Some(self.runtime.spawn(async move {
             let result = if action == Action::Load {
-                client.load(&route, panel == Panel::Keys).await
+                client.load(&route).await
             } else {
                 client.request(&method, &route, body, &operation).await
             };
@@ -439,6 +470,7 @@ impl App {
                 page,
                 cursor,
                 result,
+                session: client.saved_session().await,
             }));
         }));
         self.set(FEEDBACK, "正在处理…");
@@ -479,6 +511,15 @@ impl App {
             return Ok(());
         }
         if self.account.task.is_some() {
+            return Ok(());
+        }
+        if matches!(id, PAYMENT_TAB | JOURNAL_TAB) {
+            self.account.panel = if id == PAYMENT_TAB {
+                Panel::Payments
+            } else {
+                Panel::Journal
+            };
+            self.account_page_entered();
             return Ok(());
         }
         if id == SWITCH {
@@ -522,6 +563,7 @@ impl App {
                 ensure!(password.chars().count() >= 12, "密码至少 12 个字符");
                 ensure!(!self.text(NAME).trim().is_empty(), "请填写名称");
             }
+            self.disconnect_identity()?;
             self.account.clear();
             self.account.base = base.clone();
             self.account.client = Some(Arc::new(AccountClient::new(&base)?));
@@ -551,13 +593,10 @@ impl App {
         let mut body = json!({});
         let mut operation = String::new();
         match id {
-            RELOAD => {
-                return self.account_load(
-                    self.account.page,
-                    self.account.cursors[self.account.page].clone(),
-                );
-            }
             LOGOUT => {
+                self.disconnect_identity()?;
+                self.account.clear();
+                self.render_account();
                 action = Action::Logout;
                 method = "POST";
                 route = "logout".into();
@@ -582,42 +621,6 @@ impl App {
                     .or_else(|| view["next_before"].as_u64().map(|v| v.to_string()))
                     .unwrap_or_default();
                 return self.account_load(self.account.page + 1, cursor);
-            }
-            CREATE_KEY => {
-                let label = self.text(LABEL).trim().to_owned();
-                ensure!(!label.is_empty(), "请填写 API key 名称");
-                operation = self.account_operation(format!("key:{label}"))?;
-                action = Action::NewKey;
-                method = "POST";
-                route = "keys".into();
-                body = json!({"label":label});
-            }
-            APPLY_KEY | REVOKE_KEY => {
-                let row = self.chosen_account_row()?;
-                let key = text(&row["id"]);
-                if id == APPLY_KEY {
-                    ensure!(row["state"] == "enabled", "请等待 API key 启用后再应用");
-                    ensure!(
-                        self.task.is_none() && self.inventory_task.is_none(),
-                        "请先停止代理，再切换业务 API key"
-                    );
-                    action = Action::Apply;
-                    method = "POST";
-                    route = format!("keys/{key}/reveal");
-                } else {
-                    if MessageBoxW(
-                        self.hwnd,
-                        wide("停用后，该 API key 将无法继续请求模型。确认停用？").as_ptr(),
-                        wide("停用 API key").as_ptr(),
-                        MB_YESNO | MB_ICONQUESTION,
-                    ) != IDYES
-                    {
-                        return Ok(());
-                    }
-                    action = Action::Revoke;
-                    method = "DELETE";
-                    route = format!("keys/{key}");
-                }
             }
             PAY => {
                 ensure!(
@@ -681,7 +684,7 @@ impl App {
                         method = "POST";
                         route = format!("payments/{}/refresh", text(&row["id"]));
                     }
-                    Panel::Receipts => {
+                    Panel::Finance => {
                         action = Action::Receipt;
                         route = format!("receipts/records/{}", text(&row["seq"]));
                     }
@@ -706,17 +709,6 @@ impl App {
             return;
         }
         let detail = match self.account.panel {
-            Panel::Keys => format!(
-                "名称：{}\r\n状态：{}\r\nAPI key：{}\r\n创建时间：{}",
-                text(&row["label"]),
-                status(&row["state"]),
-                text(
-                    row.get("key")
-                        .filter(|v| !v.is_null())
-                        .unwrap_or(&row["key_error"])
-                ),
-                date(&row["created_at"])
-            ),
             Panel::Journal => format!(
                 "记录：{}\r\n金额：{}\r\n时间：{}",
                 text(&row["id"]),
@@ -733,11 +725,7 @@ impl App {
             ),
         };
         self.set(DETAILS, &detail);
-        self.account.copied = Zeroizing::new(if self.account.panel == Panel::Keys {
-            row["key"].as_str().unwrap_or("").to_owned()
-        } else {
-            detail
-        });
+        self.account.copied = Zeroizing::new(detail);
     }
     unsafe fn show_payment(&mut self, row: Value) {
         let payable = row["state"] == "pending"
@@ -783,26 +771,38 @@ impl App {
                 .zip(integer(&balance["spent_microusd"]))
                 .map(|(a, b)| Value::String((a - b).to_string()))
                 .unwrap_or(Value::Null);
-            let apps = self.account.me["applications"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let application = apps.iter().find(|a| a["kind"] == "user");
             self.set(BALANCE, &format!("可用余额　{}", money(&available)));
+            self.set(SUMMARY, &text(&self.account.me["account"]["username"]));
+            self.set(ACCOUNT_NAME, &text(&self.account.me["account"]["name"]));
             self.set(
-                SUMMARY,
+                CONNECTION_STATE,
+                if !self.account.connection_problem.is_empty() {
+                    &self.account.connection_problem
+                } else if self.router_key.is_empty() {
+                    "正在绑定"
+                } else if self.account.connection_ready {
+                    "已绑定"
+                } else {
+                    "等待 Router 同步"
+                },
+            );
+            let summary = &self.account.view["summary"];
+            self.set(
+                USAGE_SUMMARY,
                 &format!(
-                    "名称　{}\r\n\r\n开通状态　{}\r\n\r\n管理平台　{}",
-                    text(&self.account.me["account"]["name"]),
-                    application
-                        .map(|a| status(&a["status"]))
-                        .unwrap_or_else(|| "—".into()),
-                    self.account.base,
+                    "今日消费 {}    本月消费 {}\r\n调用 {} 次    待核算 {} 条",
+                    money(&summary["today_microusd"]),
+                    money(&summary["month_microusd"]),
+                    text(&summary["requests"]),
+                    text(&summary["pending"])
                 ),
             );
         } else {
             self.set(SUMMARY, "");
             self.set(BALANCE, "");
+            self.set(ACCOUNT_NAME, "");
+            self.set(CONNECTION_STATE, "");
+            self.set(USAGE_SUMMARY, "");
         }
         let panel = self.account.panel;
         let source = if !logged {
@@ -815,7 +815,6 @@ impl App {
         };
         self.account.rows = source.as_array().cloned().unwrap_or_default();
         let headings = match panel {
-            Panel::Keys => ["名称", "API key", "状态", "创建时间", ""],
             Panel::Payments => ["时间", "网络", "付款金额 USDT", "状态", "订单"],
             Panel::Journal => ["时间", "类型", "金额 USD", "编号", ""],
             _ => ["时间", "模型 / 账号池", "金额 USD", "状态", "流水"],
@@ -824,11 +823,7 @@ impl App {
             let mut label = wide(label);
             let column = LVCOLUMNW {
                 mask: LVCF_TEXT | LVCF_WIDTH,
-                cx: self.scale(if panel == Panel::Keys {
-                    [120, 180, 80, 150, 0][i]
-                } else {
-                    [180, 180, 150, 125, 120][i]
-                }),
+                cx: self.scale([174, 240, 130, 132, 100][i]),
                 pszText: label.as_mut_ptr(),
                 ..mem::zeroed()
             };
@@ -844,17 +839,6 @@ impl App {
             .rows
             .iter()
             .map(|row| match panel {
-                Panel::Keys => vec![
-                    text(&row["label"]),
-                    text(
-                        row.get("key")
-                            .filter(|v| !v.is_null())
-                            .unwrap_or(&row["key_error"]),
-                    ),
-                    status(&row["state"]),
-                    date(&row["created_at"]),
-                    String::new(),
-                ],
                 Panel::Payments => vec![
                     date(&row["created_at"]),
                     text(&row["network_name"]),
@@ -869,9 +853,9 @@ impl App {
                 Panel::Journal => vec![
                     date(&row["created_at"]),
                     if row["kind"] == "credit" {
-                        "充值".into()
+                        "余额增加".into()
                     } else {
-                        "退款 / 调整".into()
+                        "余额减少".into()
                     },
                     money(&row["amount"]),
                     text(&row["id"]),
@@ -895,23 +879,6 @@ impl App {
             })
             .collect();
         fill(TABLE.hwnd(self), &rows);
-        if panel == Panel::Keys {
-            SendMessageW(
-                TABLE.hwnd(self),
-                LVM_SETCOLUMNWIDTH,
-                1,
-                LVSCW_AUTOSIZE as isize,
-            );
-            let width = SendMessageW(TABLE.hwnd(self), LVM_GETCOLUMNWIDTH, 1, 0);
-            if width < self.scale(180) as isize {
-                SendMessageW(
-                    TABLE.hwnd(self),
-                    LVM_SETCOLUMNWIDTH,
-                    1,
-                    self.scale(180) as isize,
-                );
-            }
-        }
         self.set(
             PAGE,
             &format!("第 {} 页 · {} 条", self.account.page + 1, rows.len()),
@@ -920,6 +887,8 @@ impl App {
             DETAIL,
             if panel == Panel::Payments {
                 "刷新订单"
+            } else if panel == Panel::Finance {
+                "消费凭据"
             } else {
                 "查看"
             },
@@ -928,8 +897,6 @@ impl App {
             COPY,
             if panel == Panel::Payments {
                 "复制地址"
-            } else if panel == Panel::Keys {
-                "复制 API key"
             } else {
                 "复制详情"
             },
@@ -961,18 +928,27 @@ impl App {
         }
         self.update_visibility();
         self.account_busy();
+        self.busy(self.task.is_some());
         self.layout();
     }
     pub(super) unsafe fn account_reply(&mut self, reply: Reply) {
         self.account.task.take();
         self.account.refreshed = std::time::Instant::now();
         let action = reply.action;
+        self.account.session = reply.session;
         let value = match reply.result {
             Ok(value) => value,
             Err(error) => {
                 if error.status == 401 || action == Action::Logout {
+                    let _ = self.disconnect_identity();
                     self.account.clear();
                     self.account.client = None;
+                    self.render_account();
+                }
+                if action == Action::Bind {
+                    self.account.bind_retry =
+                        error.status == 0 || error.status == 429 || error.status >= 500;
+                    self.account.connection_problem = error.message.clone();
                     self.render_account();
                 }
                 self.set(FEEDBACK, &error.message);
@@ -981,7 +957,7 @@ impl App {
                 return;
             }
         };
-        if matches!(action, Action::NewKey | Action::Payment) {
+        if action == Action::Payment {
             self.account.attempt = None;
         }
         // A page switch does not cancel a sent mutation. Complete it, but keep
@@ -994,6 +970,7 @@ impl App {
         {
             if action == Action::Load {
                 self.account.me = value["me"].clone();
+                self.update_connection_state();
             }
             self.render_account();
             self.finish_account_refresh();
@@ -1003,6 +980,7 @@ impl App {
         match action {
             Action::Login | Action::Register => {
                 self.account.me = value;
+                self.account.bind_retry = true;
                 self.account.register = false;
                 self.account.refresh_pending =
                     is_account_page(self.page) && self.page != ACCOUNT_PAGE;
@@ -1018,15 +996,36 @@ impl App {
                 self.set(
                     FEEDBACK,
                     if save.is_ok() {
-                        "已登录"
+                        "已登录，正在绑定连接"
                     } else {
                         "已登录，平台地址未能保存"
                     },
                 );
             }
+            Action::Bind => {
+                let mut value = value;
+                let key =
+                    Zeroizing::new(value["credential"].take().as_str().unwrap_or("").to_owned());
+                let result = self.bind_identity(&value, &key);
+                if let Err(e) = result {
+                    self.set(FEEDBACK, &e.to_string());
+                } else {
+                    self.set(
+                        FEEDBACK,
+                        if self.account.connection_ready {
+                            "连接已就绪"
+                        } else {
+                            "等待 Router 同步"
+                        },
+                    );
+                }
+                self.account.bind_retry = self.router_key.is_empty();
+                self.render_account();
+            }
             Action::Load => {
                 let payment_id = self.account.detail["id"].clone();
                 self.account.me = value["me"].clone();
+                self.update_connection_state();
                 self.account.view = value["view"].clone();
                 self.account.page = reply.page;
                 self.account.cursors.truncate(reply.page + 1);
@@ -1056,6 +1055,7 @@ impl App {
                 );
             }
             Action::Logout | Action::Password => {
+                let _ = self.disconnect_identity();
                 self.account.clear();
                 self.account.client = None;
                 self.set(PASSWORD, "");
@@ -1076,21 +1076,6 @@ impl App {
                     },
                 );
             }
-            Action::Apply => {
-                let mut value = value;
-                let key = Zeroizing::new(match value["key"].take() {
-                    Value::String(key) => key,
-                    _ => String::new(),
-                });
-                let result = self.apply_account_key(&key);
-                self.set(
-                    FEEDBACK,
-                    &match result {
-                        Ok(()) => "API key 已应用并保存".into(),
-                        Err(e) => e.to_string(),
-                    },
-                );
-            }
             Action::Receipt => {
                 let detail = serde_json::to_string_pretty(&value).unwrap_or_default();
                 self.set(DETAILS, &detail);
@@ -1107,9 +1092,6 @@ impl App {
                 }
                 followup = true;
             }
-            _ => {
-                followup = true;
-            }
         }
         self.account_busy();
         if followup
@@ -1118,6 +1100,11 @@ impl App {
                 self.account.page,
                 self.account.cursors[self.account.page].clone(),
             )
+        {
+            self.set(FEEDBACK, &e.to_string());
+        }
+        if matches!(action, Action::Login | Action::Register)
+            && let Err(e) = self.bind_account()
         {
             self.set(FEEDBACK, &e.to_string());
         }
@@ -1133,33 +1120,131 @@ impl App {
             self.set(FEEDBACK, &error.to_string());
         }
     }
-    unsafe fn apply_account_key(&mut self, key: &str) -> Result<()> {
-        ensure!(!key.is_empty(), "平台返回的 API key 无效");
+    unsafe fn bind_account(&mut self) -> Result<()> {
+        let device = identity::device(self.path.parent().unwrap())?;
+        self.submit_account(
+            Action::Bind,
+            "POST",
+            "connection".into(),
+            json!({"device_id": device}),
+            (0, String::new()),
+            String::new(),
+        )
+    }
+    unsafe fn bind_identity(&mut self, value: &Value, key: &str) -> Result<()> {
+        ensure!(!key.is_empty() && key.len() <= 8192, "平台连接凭据无效");
+        let router = value["router_url"]
+            .as_str()
+            .context("平台未配置 Router 地址")?;
+        let url = reqwest::Url::parse(router)?;
         ensure!(
-            self.task.is_none() && self.inventory_task.is_none(),
-            "请先停止代理，再应用 API key"
+            url.scheme() == "https"
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none(),
+            "Router 地址无效"
         );
-        let (mut profile, mut secrets) = settings::load(&self.path)?;
-        if profile.router.is_empty() {
-            profile.router = "https://router.teerouter.org".into();
-        }
-        secrets.router_key = key.to_owned();
-        settings::save(&self.path, &profile, &secrets)?;
-        self.set(ROUTER_KEY, key);
-        if self.text(ROUTER).is_empty() {
-            self.set(ROUTER, &profile.router);
-        }
+        self.router_key = Zeroizing::new(key.to_owned());
+        self.account.connection_problem.clear();
+        self.account.connection_id = value["connection_id"]
+            .as_str()
+            .context("连接身份无效")?
+            .to_owned();
+        self.account.connection_ready = value["state"] == "enabled";
+        self.set(ROUTER, router);
+        self.persist_identity()?;
         self.invalidate_catalog();
         self.invalidate_prices();
+        self.update_summary();
+        self.busy(self.task.is_some());
         Ok(())
     }
+    unsafe fn persist_identity(&self) -> Result<()> {
+        let session: Value = serde_json::from_slice(&self.account.session)?;
+        // Only identity/session data is cached. Wallet and financial records
+        // are always loaded from the platform for the current account.
+        identity::save(
+            self.path.parent().unwrap(),
+            &json!({
+                "version":1,"platform":self.account.base,"account":self.account.me["account"],
+                "connection_id":self.account.connection_id,"credential":self.router_key.as_str(),
+                "router_url":self.text(ROUTER),"session":session
+            }),
+        )
+    }
+    pub(super) unsafe fn restore_identity(&mut self) -> Result<()> {
+        let Some(saved) = identity::load(self.path.parent().unwrap())? else {
+            return Ok(());
+        };
+        ensure!(
+            saved["version"] == 1 && saved["account"]["role"] == "user",
+            "登录信息无效"
+        );
+        let base = account_client::platform(saved["platform"].as_str().context("平台地址无效")?)?;
+        let client = AccountClient::restore(&base, &saved["session"])?;
+        self.account.base = base.clone();
+        self.set(PLATFORM, &base);
+        self.account.client = Some(Arc::new(client));
+        self.account.me = json!({"account":saved["account"]});
+        self.router_key = Zeroizing::new(saved["credential"].as_str().unwrap_or("").to_owned());
+        self.account.connection_id = saved["connection_id"].as_str().unwrap_or("").to_owned();
+        self.set(ROUTER, saved["router_url"].as_str().unwrap_or(""));
+        self.account.session = Zeroizing::new(serde_json::to_vec(&saved["session"])?);
+        self.account.bind_retry = self.router_key.is_empty();
+        // Verify the restored session before enabling this account's proxy.
+        self.account.connection_ready = false;
+        self.render_account();
+        self.account_load(0, String::new())
+    }
+    unsafe fn update_connection_state(&mut self) {
+        if self.account.connection_id.is_empty() {
+            return;
+        }
+        let state = self.account.me["keys"]
+            .as_array()
+            .and_then(|keys| keys.iter().find(|k| k["id"] == self.account.connection_id))
+            .map(|k| text(&k["state"]));
+        self.account.connection_ready = state.as_deref() == Some("enabled");
+        if state.is_none()
+            || state.as_deref() == Some("disabled")
+            || self.account.me.pointer("/balance/enabled") == Some(&Value::Bool(false))
+        {
+            self.stop();
+            self.router_key = Zeroizing::new(String::new());
+            self.account.bind_retry = false;
+            self.account.connection_problem = "连接已停用".into();
+            let _ = identity::clear(self.path.parent().unwrap());
+        }
+        self.busy(self.task.is_some());
+    }
+    unsafe fn disconnect_identity(&mut self) -> Result<()> {
+        self.stop();
+        self.router_key = Zeroizing::new(String::new());
+        self.account.connection_id.clear();
+        self.account.connection_ready = false;
+        self.account.bind_retry = false;
+        self.invalidate_catalog();
+        self.invalidate_prices();
+        self.update_summary();
+        identity::clear(self.path.parent().unwrap())
+    }
     pub(super) unsafe fn account_poll(&mut self) {
-        if is_account_page(self.page)
+        if self.account.logged_in()
+            && self.account.task.is_none()
+            && self.account.bind_retry
+            && self.account.refreshed.elapsed().as_secs() >= 15
+            && let Err(e) = self.bind_account()
+        {
+            self.set(FEEDBACK, &e.to_string());
+        }
+        if (is_account_page(self.page) || !self.account.connection_ready)
             && IsWindowVisible(self.hwnd) != 0
             && self.account.logged_in()
             && self.account.task.is_none()
             && self.account.refreshed.elapsed().as_secs()
-                >= if self.account.panel == Panel::Payments {
+                >= if !self.account.connection_ready {
+                    5
+                } else if self.account.panel == Panel::Payments {
                     15
                 } else {
                     300
@@ -1240,7 +1325,7 @@ mod tests {
             app.build_shell(&Profile::default(), &Secrets::default())
                 .unwrap();
             app.page = ACCOUNT_PAGE;
-            let view = json!({"account":{"role":"user","username":"fixture-user","name":"Fixture"},"balance":{"ceiling_microusd":20000000,"spent_microusd":500001},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
+            let view = json!({"account":{"role":"user","username":"fixture-user","name":"Fixture"},"balance":{"enabled":true,"ceiling_microusd":20000000,"spent_microusd":500001},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
             let login = view.clone();
             let me = view.clone();
             let payment_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -1251,11 +1336,15 @@ mod tests {
             let mock=Router::new()
                 .route("/portal/api/login",post(move ||{let mut v=login.clone();v["csrf"]=json!("fixture-csrf");async move {([("set-cookie","teerouter_portal=fixture; HttpOnly")],Json(v))}}))
                 .route("/portal/api/me",get(move |headers:HeaderMap|{let v=me.clone();async move {assert_eq!(headers["cookie"],"teerouter_portal=fixture");Json(v)}}))
-                .route("/portal/api/keys/k_fixture/reveal",post(|headers:HeaderMap|async move {
+                .route("/portal/api/connection",post(|headers:HeaderMap,Json(body):Json<Value>|async move {
+                    assert_eq!(body.as_object().unwrap().len(), 1);
+                    assert_eq!(body["device_id"].as_str().unwrap().len(), 48);
                     assert_eq!(headers["cookie"],"teerouter_portal=fixture");
                     assert_eq!(headers["x-csrf-token"],"fixture-csrf");
-                    Json(json!({"key":"fixture-full-api-key-with-all-characters"}))
+                    Json(json!({"credential":"fixture-private-router-credential","connection_id":"k_fixture","state":"enabled","router_url":"https://router.example.invalid"}))
                 }))
+                .route("/portal/api/finance", get(|| async { Json(json!({"summary":{"requests":1,"pending":0,"today_microusd":123,"month_microusd":123},"data":[{"seq":"1","model":"fixture","pool":"fixture-pool","charge_microusd":"123"}],"journal":{"data":[{"id":"2","kind":"credit","amount":"20000000"}],"has_more":false}})) }))
+                .route("/portal/api/receipts/records/1", get(|| async { Json(json!({"proof":"signed-fixture"})) }))
                 .route("/portal/api/payments",get(move || {
                     let order = payment_get.lock().unwrap().clone();
                     async move {Json(json!({"data":if order.is_null(){vec![]}else{vec![order]},"has_more":false,"config":{"enabled":true,"channels":[{"id":"tron","name":"TRON"}]}}))}
@@ -1294,39 +1383,17 @@ mod tests {
             assert!(app.text(BALANCE).contains("$19.499999"));
             assert!(!app.account.visible(USERNAME.hwnd(&app)));
             assert!(app.account.visible(IDENTITY.hwnd(&app)));
-            app.select_page(KEYS_PAGE);
-            complete(&mut app);
-            assert_eq!(app.account.rows.len(), 1);
-            assert_eq!(app.account.rows[0]["label"], "Laptop");
-            assert_eq!(
-                app.account.rows[0]["key"],
-                "fixture-full-api-key-with-all-characters"
-            );
-            let selection = LVITEMW {
-                stateMask: LVIS_SELECTED,
-                state: LVIS_SELECTED,
-                ..mem::zeroed()
-            };
-            SendMessageW(
-                TABLE.hwnd(&app),
-                LVM_SETITEMSTATE,
-                0,
-                (&selection as *const LVITEMW) as isize,
-            );
-            app.account_selection_changed();
-            assert!(
-                app.text(DETAILS)
-                    .contains("API key：fixture-full-api-key-with-all-characters")
-            );
-            assert_eq!(
-                app.account.copied.as_str(),
-                "fixture-full-api-key-with-all-characters"
-            );
-            assert_eq!(app.text(COPY), "复制 API key");
-            assert!(!app.account.visible(PAY.hwnd(&app)));
-            // Switch before the previous fetch completes. Its key list must not
-            // be rendered under the payments heading when the response arrives.
-            app.select_page(KEYS_PAGE);
+            assert_eq!(app.router_key.as_str(), "fixture-private-router-credential");
+            assert!(app.account.connection_ready());
+            assert!(!app.by_id.contains_key(&102));
+            assert!(!app.by_id.contains_key(&1527));
+            app.set(CLIENT_KEY, "local-api-key-never-uploaded");
+            let saved = identity::load(&root).unwrap().unwrap();
+            assert_eq!(saved["credential"], "fixture-private-router-credential");
+            assert!(!saved.to_string().contains("local-api-key"));
+            assert!(saved.get("balance").is_none());
+            // Switching away while a read is in flight cannot fill the wrong page.
+            app.select_page(FINANCE_PAGE);
             app.select_page(PAYMENTS_PAGE);
             complete(&mut app);
             assert_eq!(app.account.channels.len(), 1);
@@ -1360,13 +1427,48 @@ mod tests {
             assert_eq!(app.account.rows.len(), 1);
             assert!(app.text(DETAILS).contains("10.000123"));
             assert_eq!(app.account.copied.as_str(), "fixture-address");
-            app.select_page(SECURITY_PAGE);
+            app.select_page(ACCOUNT_PAGE);
             complete(&mut app);
             assert!(app.account.visible(CURRENT.hwnd(&app)));
             assert!(!app.account.visible(TABLE.hwnd(&app)));
             assert!(!app.account.visible(PAY.hwnd(&app)));
-            assert_eq!(app.text(PAGE_TITLE), "账号安全");
+            assert_eq!(app.text(PAGE_TITLE), "我的账户");
+            app.select_page(PAYMENTS_PAGE);
+            complete(&mut app);
+            app.account_action(JOURNAL_TAB).unwrap();
+            complete(&mut app);
+            assert_eq!(app.account.panel, Panel::Journal);
+            assert_eq!(app.account.rows[0]["amount"], "20000000");
+            assert!(!app.account.visible(PAY.hwnd(&app)));
+            assert!(app.account.visible(BALANCE.hwnd(&app)));
+            app.account_action(PAYMENT_TAB).unwrap();
+            complete(&mut app);
+            assert!(app.account.visible(PAY.hwnd(&app)));
+            app.select_page(FINANCE_PAGE);
+            complete(&mut app);
+            let selection = LVITEMW {
+                stateMask: LVIS_SELECTED,
+                state: LVIS_SELECTED,
+                ..mem::zeroed()
+            };
+            SendMessageW(
+                TABLE.hwnd(&app),
+                LVM_SETITEMSTATE,
+                0,
+                (&selection as *const LVITEMW) as isize,
+            );
+            app.account_action(DETAIL).unwrap();
+            complete(&mut app);
+            assert!(app.text(DETAILS).contains("signed-fixture"));
+            let (shutdown, mut shutdown_rx) = tokio::sync::oneshot::channel();
+            app.shutdown = Some(shutdown);
+            app.task = Some(app.runtime.spawn(std::future::pending::<()>()));
+            app.running = true;
             app.account_action(LOGOUT).unwrap();
+            assert!(app.stopping);
+            assert!(shutdown_rx.try_recv().is_ok());
+            assert!(app.router_key.is_empty());
+            assert!(app.account.rows.is_empty());
             complete(&mut app);
             assert!(!app.account.logged_in());
             assert!(app.account.rows.is_empty());
@@ -1375,16 +1477,21 @@ mod tests {
             assert!(app.text(DETAILS).is_empty());
             assert!(app.account.visible(USERNAME.hwnd(&app)));
             assert!(!app.account.visible(TABLE.hwnd(&app)));
-            app.select_page(RECEIPTS_PAGE);
+            app.select_page(FINANCE_PAGE);
             assert!(app.account.visible(GO_LOGIN.hwnd(&app)));
             assert!(!app.account.visible(USERNAME.hwnd(&app)));
             app.account_action(GO_LOGIN).unwrap();
             assert_eq!(app.page, ACCOUNT_PAGE);
             assert!(app.account.visible(USERNAME.hwnd(&app)));
+            assert!(app.router_key.is_empty());
+            assert!(identity::load(&root).unwrap().is_none());
+            assert_eq!(app.text(CLIENT_KEY), "local-api-key-never-uploaded");
+            assert!(!app.catalog_loaded);
+            assert!(app.catalog.pools.is_empty());
+            app.task.take().unwrap().abort();
             server.abort();
             DestroyWindow(app.hwnd);
-            std::fs::remove_file(root.join("account-platform.json")).unwrap();
-            std::fs::remove_dir(root).unwrap();
+            std::fs::remove_dir_all(root).unwrap();
         }
     }
     #[test]

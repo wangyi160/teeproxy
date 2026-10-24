@@ -29,7 +29,7 @@ pub struct Profile {
 impl Default for Profile {
     fn default() -> Self {
         Self {
-            router: String::new(),
+            router: "https://router.teerouter.org".into(),
             listen_ip: "127.0.0.1".into(),
             port: 8899,
             tdx_policy: String::new(),
@@ -260,7 +260,7 @@ fn import_policy(value: &str, source: &Path, destination: &Path, kind: &str) -> 
 }
 use std::os::windows::ffi::OsStrExt;
 
-fn crypt(bytes: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>> {
+pub(super) fn crypt(bytes: &[u8], protect: bool) -> Result<Zeroizing<Vec<u8>>> {
     ensure!(bytes.len() <= 64 * 1024, "API key 数据过大");
     let input = CRYPT_INTEGER_BLOB {
         cbData: bytes.len() as u32,

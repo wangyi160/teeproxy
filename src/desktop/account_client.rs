@@ -1,4 +1,4 @@
-//! Native account API transport. Sessions remain in memory; no local HTTP server.
+//! Native account API transport. Local Agent credentials never enter this module.
 use anyhow::{Result, ensure};
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
@@ -66,19 +66,20 @@ fn allowed(method: &str, route: &str) -> bool {
         ("GET", ["receipts", "records", seq]) => {
             !seq.is_empty() && seq.bytes().all(|c| c.is_ascii_digit())
         }
-        ("POST", ["login" | "register" | "logout" | "password" | "keys" | "payments"]) => {
+        ("POST", ["login" | "register" | "logout" | "password" | "connection" | "payments"]) => {
             !route.contains('?')
         }
-        ("GET", ["payments", key])
-        | ("POST", ["payments", key, "refresh"])
-        | ("POST", ["keys", key, "reveal"])
-        | ("DELETE", ["keys", key]) => id(key) && !route.contains('?'),
+        ("GET", ["payments", key]) | ("POST", ["payments", key, "refresh"]) => {
+            id(key) && !route.contains('?')
+        }
         _ => false,
     }
 }
 pub(super) fn error_message(code: &str, status: u16) -> String {
     let message = match code {
         "invalid_credentials" => "用户名或密码错误",
+        "connection_revoked" => "此设备的连接权限已被停用，请联系管理员",
+        "user_disabled" => "账户已停用",
         "username_unavailable" => "用户名已被注册",
         "registration_disabled" => "平台暂未开放注册",
         "invalid_password" | "password_incorrect" => "当前密码错误",
@@ -100,6 +101,32 @@ pub(super) fn error_message(code: &str, status: u16) -> String {
     message.into()
 }
 impl AccountClient {
+    pub fn restore(base: &str, value: &Value) -> Result<Self> {
+        let mut client = Self::new(base)?;
+        let cookie = value["cookie"].as_str().unwrap_or("");
+        let csrf = value["csrf"].as_str().unwrap_or("");
+        ensure!(
+            cookie.starts_with("teerouter_portal=")
+                && cookie.len() < 256
+                && !csrf.is_empty()
+                && csrf.len() < 256,
+            "登录信息无效"
+        );
+        client.session = Mutex::new(Session {
+            cookie: Zeroizing::new(cookie.into()),
+            csrf: Zeroizing::new(csrf.into()),
+        });
+        Ok(client)
+    }
+    pub async fn saved_session(&self) -> Zeroizing<Vec<u8>> {
+        let session = self.session.lock().await;
+        Zeroizing::new(
+            serde_json::to_vec(
+                &json!({"cookie":session.cookie.as_str(),"csrf":session.csrf.as_str()}),
+            )
+            .unwrap_or_default(),
+        )
+    }
     #[cfg(test)]
     pub(super) fn test_client(base: String) -> Self {
         let mut client = Self::new("https://example.invalid").unwrap();
@@ -227,11 +254,7 @@ impl AccountClient {
         }
         result
     }
-    pub async fn load(
-        &self,
-        route: &str,
-        include_keys: bool,
-    ) -> std::result::Result<Value, Failure> {
+    pub async fn load(&self, route: &str) -> std::result::Result<Value, Failure> {
         let me = self.request("GET", "me", json!({}), "").await?;
         if me.pointer("/account/role").and_then(Value::as_str) != Some("user") {
             *self.session.lock().await = Session::default();
@@ -240,21 +263,7 @@ impl AccountClient {
                 message: "请重新使用用户账号登录".into(),
             });
         }
-        let view = if include_keys {
-            let mut keys = me["keys"].as_array().cloned().unwrap_or_default();
-            for key in &mut keys {
-                let id = key["id"].as_str().unwrap_or("");
-                match self
-                    .request("POST", &format!("keys/{id}/reveal"), json!({}), "")
-                    .await
-                {
-                    Ok(mut value) => key["key"] = value["key"].take(),
-                    Err(error) if error.status == 401 => return Err(error),
-                    Err(error) => key["key_error"] = json!(error.message),
-                }
-            }
-            json!({"data": keys})
-        } else if route == "me" {
+        let view = if route == "me" {
             Value::Null
         } else {
             self.request("GET", route, json!({}), "").await?
@@ -278,7 +287,8 @@ mod tests {
             assert!(!allowed("POST", route));
         }
         assert!(allowed("GET", "receipts/mine?before=12"));
-        assert!(allowed("POST", "keys/k_123/reveal"));
+        assert!(!allowed("POST", "keys/k_123/reveal"));
+        assert!(allowed("POST", "connection"));
         assert!(platform("http://127.0.0.1").is_err());
         assert!(platform("https://user:secret@example.com").is_err());
     }
@@ -319,6 +329,14 @@ mod tests {
                 .is_ok()
         );
         assert!(client.request("GET", "me", json!({}), "").await.is_ok());
+        let saved = client.saved_session().await;
+        let mut restored = AccountClient::restore(
+            "https://example.invalid",
+            &serde_json::from_slice(&saved).unwrap(),
+        )
+        .unwrap();
+        restored.base = client.base.clone();
+        assert!(restored.request("GET", "me", json!({}), "").await.is_ok());
         assert!(
             client
                 .request("GET", "finance", json!({}), "")

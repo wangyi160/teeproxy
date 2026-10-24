@@ -4,6 +4,7 @@
 mod account_client;
 mod account_ui;
 pub(crate) mod catalog;
+mod identity;
 mod inventory_ui;
 mod layout_ui;
 mod pricing;
@@ -39,7 +40,6 @@ use windows_sys::{
 use zeroize::Zeroizing;
 
 const ROUTER: u16 = 101;
-const ROUTER_KEY: u16 = 102;
 const PORT: u16 = 103;
 const TDX: u16 = 105;
 const SNP: u16 = 106;
@@ -54,9 +54,22 @@ const START: u16 = 203;
 const COPY: u16 = 205;
 const BROWSE_TDX: u16 = 206;
 const BROWSE_SNP: u16 = 207;
-const SHOW_KEYS: u16 = 208;
-const FIELDS: [u16; 10] = [
-    ROUTER, ROUTER_KEY, LISTEN_IP, PORT, TDX, SNP, CLIENT_KEY, BROWSE_TDX, BROWSE_SNP, SAVE,
+const GENERATE_KEY: u16 = 209;
+const COPY_KEY: u16 = 210;
+const SAVE_TRUST: u16 = 211;
+const FIELDS: [u16; 12] = [
+    ROUTER,
+    LISTEN_IP,
+    PORT,
+    TDX,
+    SNP,
+    CLIENT_KEY,
+    BROWSE_TDX,
+    BROWSE_SNP,
+    SAVE,
+    SAVE_TRUST,
+    GENERATE_KEY,
+    account_ui::PLATFORM,
 ];
 
 enum Event {
@@ -78,6 +91,7 @@ struct Control {
 }
 struct App {
     account: account_ui::State,
+    router_key: Zeroizing<String>,
     hwnd: HWND,
     controls: Vec<Control>,
     input_frames: Vec<([i32; 4], Option<usize>, HWND)>,
@@ -123,6 +137,7 @@ impl App {
         let (sender, receiver) = mpsc::channel();
         Ok(Self {
             account: account_ui::State::default(),
+            router_key: Zeroizing::new(String::new()),
             hwnd: ptr::null_mut(),
             controls: Vec::new(),
             input_frames: Vec::new(),
@@ -320,9 +335,7 @@ impl App {
         SendMessageW(
             hwnd,
             EM_SETLIMITTEXT,
-            if id == ROUTER_KEY {
-                8192
-            } else if id == PORT {
+            if id == PORT {
                 5
             } else if id == LISTEN_IP {
                 45
@@ -390,11 +403,10 @@ impl App {
         );
         self.layout();
         self.busy(false);
-        self.select_page(if profile.router.is_empty() {
-            SETTINGS_PAGE
-        } else {
-            OVERVIEW
-        });
+        self.select_page(ACCOUNT_PAGE);
+        if let Err(e) = self.restore_identity() {
+            self.account_error(&e);
+        }
         self.tray = Some(tray::Tray::new(self.hwnd));
         if !self.tray.as_ref().is_some_and(|tray| tray.installed) {
             self.append("系统托盘注册失败；窗口保持任务栏显示，关闭窗口将退出。");
@@ -527,10 +539,10 @@ impl App {
     }
     unsafe fn action_failed(&mut self, id: u16, error: &anyhow::Error) {
         let secrets = Secrets {
-            router_key: self.text(ROUTER_KEY),
+            router_key: self.router_key.to_string(),
             client_key: self.text(CLIENT_KEY),
         };
-        let action = if matches!(id, SAVE | ROUTE_SAVE) {
+        let action = if matches!(id, SAVE | SAVE_TRUST | ROUTE_SAVE) {
             "保存失败"
         } else {
             "操作失败"
@@ -556,7 +568,7 @@ impl App {
             routing: self.routing_policy()?,
         };
         let secrets = Secrets {
-            router_key: self.text(ROUTER_KEY),
+            router_key: self.router_key.to_string(),
             client_key: self.text(CLIENT_KEY),
         };
         profile.config(&secrets, self.path.parent().unwrap())?;
@@ -586,6 +598,10 @@ impl App {
         for id in FIELDS {
             EnableWindow(self.by_id[&id], (!value) as i32);
         }
+        if self.account.logged_in() {
+            EnableWindow(self.by_id[&account_ui::PLATFORM], 0);
+            EnableWindow(self.by_id[&ROUTER], 0);
+        }
         EnableWindow(self.by_id[&VERIFY], (!value) as i32);
         EnableWindow(self.by_id[&START], (!self.stopping) as i32);
         self.set(
@@ -608,20 +624,22 @@ impl App {
             return Ok(());
         }
         match id {
-            1511..=1543 => return self.account_action(id),
+            1511..=1548 => return self.account_action(id),
             NAV_FIRST..=NAV_LAST => {
                 self.select_page((id - NAV_FIRST) as usize);
-                if self.page == PRICE_PAGE
-                    && !self.prices_loaded
-                    && !self.text(ROUTER_KEY).is_empty()
-                {
+                if self.page == PRICE_PAGE && !self.prices_loaded && !self.router_key.is_empty() {
                     self.refresh_prices()?;
                 }
             }
             OPEN_SETTINGS => self.select_page(SETTINGS_PAGE),
-            SAVE => {
+            SAVE | SAVE_TRUST => {
+                let base = account_client::platform(&self.text(account_ui::PLATFORM))?;
                 let (profile, secrets) = self.snapshot()?;
                 self.save_profile(&profile, &secrets)?;
+                std::fs::write(
+                    self.path.parent().unwrap().join("account-platform.json"),
+                    serde_json::to_vec(&base)?,
+                )?;
                 self.append("配置已保存，API key 已使用当前 Windows 用户加密。");
                 self.update_route_summary();
                 self.status(
@@ -634,6 +652,13 @@ impl App {
                 );
             }
             VERIFY | START if self.task.is_none() && self.inventory_task.is_none() => {
+                if id == START {
+                    ensure!(self.account.logged_in(), "请先登录账户");
+                    ensure!(
+                        !self.router_key.is_empty() && self.account.connection_ready(),
+                        "账户连接尚未就绪，请查看我的账户"
+                    );
+                }
                 let (profile, secrets) = self.snapshot()?;
                 let config = profile.config(&secrets, self.path.parent().unwrap())?;
                 if id == START {
@@ -724,17 +749,11 @@ impl App {
                     self.set(if id == BROWSE_TDX { TDX } else { SNP }, &path);
                 }
             }
-            SHOW_KEYS => {
-                let show =
-                    SendMessageW(self.by_id[&SHOW_KEYS], BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
-                SendMessageW(
-                    self.by_id[&ROUTER_KEY],
-                    EM_SETPASSWORDCHAR,
-                    if show { 0 } else { 0x25cf },
-                    0,
-                );
-                InvalidateRect(self.by_id[&ROUTER_KEY], ptr::null(), 1);
-            }
+            GENERATE_KEY => self.set(
+                CLIENT_KEY,
+                &format!("sk-local-{}", account_client::operation_id()?),
+            ),
+            COPY_KEY => copy_text(self.hwnd, &self.text(CLIENT_KEY))?,
             _ => {}
         }
         Ok(())
@@ -1082,7 +1101,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                                 .unwrap_or_default(),
                         );
                     }
-                    if matches!(id, ROUTER | ROUTER_KEY | TDX | SNP) {
+                    if matches!(id, ROUTER | TDX | SNP) {
                         app.invalidate_catalog();
                         app.invalidate_prices();
                     }
@@ -1093,7 +1112,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                         || matches!(id, tray::OPEN | tray::TOGGLE | tray::EXIT))
                     && let Err(error) = app.action(id)
                 {
-                    if (1511..=1543).contains(&id) {
+                    if (1511..=1548).contains(&id) {
                         app.account_error(&error);
                     } else {
                         app.action_failed(id, &error);

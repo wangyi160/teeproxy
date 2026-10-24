@@ -66,7 +66,7 @@ client_key_env = "TEEPROXY_CLIENT_KEY"
 
 向 teeproxy 提供该环境变量，值为 16–256 个可见 ASCII 字符。将同一个值配置到 agent 的 API key：Codex 用 `TEEPROXY_AGENT_KEY`，Claude Code 用 `ANTHROPIC_API_KEY`。teeproxy API key 与 router key 分离，仅用于 Agent 到 teeproxy，不转发 Router；非回环监听必须设置。支持 `Authorization: Bearer ...`、`x-api-key` 或 `x-goog-api-key`；请求含有多项认证时必须全部匹配。失败返回 401。
 
-桌面版在“连接设置 → API key”直接填写同样格式的值，无需设置上述 teeproxy 环境变量；agent 的 API key 仍应与此值一致。保存后重启会自动显示已配置的值，无需重新填写。
+桌面版在“Agent 接入 → API key”直接填写同样格式的值，无需设置上述 teeproxy 环境变量；agent 的 API key 仍应与此值一致。保存后重启会自动显示已配置的值，无需重新填写。
 
 ## 从 0.1 迁移
 
