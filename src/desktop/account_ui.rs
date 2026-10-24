@@ -11,7 +11,6 @@ const PASSWORD: u16 = 1513;
 const NAME: u16 = 1514;
 const SUBMIT: u16 = 1515;
 const SWITCH: u16 = 1516;
-pub(super) const TAB: u16 = 1517;
 const IDENTITY: u16 = 1518;
 const LOGOUT: u16 = 1519;
 const RELOAD: u16 = 1520;
@@ -36,7 +35,8 @@ const NEW_PASSWORD: u16 = 1538;
 const CHANGE_PASSWORD: u16 = 1539;
 const COPY_AMOUNT: u16 = 1540;
 const PAGE: u16 = 1541;
-const RECHARGE: u16 = 1542;
+const BALANCE: u16 = 1542;
+const GO_LOGIN: u16 = 1543;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Panel {
@@ -51,20 +51,17 @@ pub(super) enum Panel {
     Journal,
 }
 impl Panel {
-    fn from(index: usize) -> Self {
-        [
-            Self::Overview,
-            Self::Keys,
-            Self::Payments,
-            Self::Finance,
-            Self::Receipts,
-            Self::Access,
-            Self::Security,
-            Self::Journal,
-        ]
-        .get(index)
-        .copied()
-        .unwrap_or_default()
+    fn for_page(page: usize) -> Self {
+        match page {
+            KEYS_PAGE => Self::Keys,
+            PAYMENTS_PAGE => Self::Payments,
+            FINANCE_PAGE => Self::Finance,
+            RECEIPTS_PAGE => Self::Receipts,
+            ACCESS_PAGE => Self::Access,
+            SECURITY_PAGE => Self::Security,
+            JOURNAL_PAGE => Self::Journal,
+            _ => Self::Overview,
+        }
     }
     fn route(self, cursor: &str, offset: u64) -> String {
         match self {
@@ -97,6 +94,7 @@ enum Group {
     Always,
     Guest,
     Register,
+    Locked,
     Member,
     Panel(Panel),
     Table,
@@ -119,6 +117,7 @@ pub(super) enum Action {
 }
 pub(super) struct Reply {
     action: Action,
+    panel: Panel,
     page: usize,
     cursor: String,
     pub result: std::result::Result<Value, Failure>,
@@ -140,6 +139,7 @@ pub(super) struct State {
     copied: Zeroizing<String>,
     attempt: Option<(String, String)>,
     refreshed: std::time::Instant,
+    refresh_pending: bool,
 }
 impl Default for State {
     fn default() -> Self {
@@ -160,6 +160,7 @@ impl Default for State {
             copied: Zeroizing::new(String::new()),
             attempt: None,
             refreshed: std::time::Instant::now(),
+            refresh_pending: false,
         }
     }
 }
@@ -177,13 +178,14 @@ impl State {
         self.attempt = None;
         self.page = 0;
         self.cursors = vec![String::new()];
-        self.panel = Panel::Overview;
+        self.refresh_pending = false;
     }
     pub fn visible(&self, hwnd: HWND) -> bool {
         let logged = self.logged_in();
         match self.groups.get(&(hwnd as usize)) {
-            Some(Group::Guest) => !logged,
-            Some(Group::Register) => !logged && self.register,
+            Some(Group::Guest) => !logged && self.panel == Panel::Overview,
+            Some(Group::Register) => !logged && self.register && self.panel == Panel::Overview,
+            Some(Group::Locked) => !logged && self.panel != Panel::Overview,
             Some(Group::Member) => logged,
             Some(Group::Panel(panel)) => logged && self.panel == *panel,
             Some(Group::Table) => logged && self.panel.has_table(),
@@ -283,28 +285,11 @@ impl App {
         self.add(IDENTITY, w!("STATIC"), "", SS_LEFT, [260, 134, -590, 28], 3)?;
         self.button(RELOAD, "刷新", [-240, 128, 88, 36], 0)?;
         self.button(LOGOUT, "退出登录", [-140, 128, 104, 36], 0)?;
-        let tab = self.add(
-            TAB,
-            w!("COMBOBOX"),
-            "",
-            WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
-            [260, 180, 200, 300],
-            0,
-        )?;
-        for label in [
-            "账户概览",
-            "API keys",
-            "USDT 充值",
-            "消费明细",
-            "消费凭据",
-            "商户授权",
-            "账号安全",
-            "资金记录",
-        ] {
-            SendMessageW(tab, CB_ADDSTRING, 0, wide(label).as_ptr() as isize);
-        }
-        SendMessageW(tab, CB_SETCURSEL, 0, 0);
         self.account_group(start, Group::Member);
+        let start = self.controls.len();
+        self.label("请先登录", [268, 210, 300, 28], 3)?;
+        self.button(GO_LOGIN, "前往登录", [268, 264, 150, 40], 0)?;
+        self.account_group(start, Group::Locked);
         let start = self.controls.len();
         self.add(
             SUMMARY,
@@ -314,7 +299,6 @@ impl App {
             [268, 250, -328, 300],
             3,
         )?;
-        self.button(RECHARGE, "充值", [268, 590, 120, 40], 0)?;
         self.account_group(start, Group::Panel(Panel::Overview));
         let start = self.controls.len();
         self.table(
@@ -351,6 +335,7 @@ impl App {
         self.button(REVOKE_KEY, "停用", [746, 238, 90, 38], 0)?;
         self.account_group(start, Group::Panel(Panel::Keys));
         let start = self.controls.len();
+        self.add(BALANCE, w!("STATIC"), "", SS_LEFT, [260, 184, -590, 28], 3)?;
         self.add(
             NETWORK,
             w!("COMBOBOX"),
@@ -417,19 +402,21 @@ impl App {
             EnableWindow(PAY.hwnd(self), configured as i32);
         }
     }
-    pub(super) unsafe fn account_tab_changed(&mut self) {
-        if self.account.task.is_some() || !self.account.logged_in() {
-            return;
-        }
-        self.account.panel = Panel::from(SendMessageW(TAB.hwnd(self), CB_GETCURSEL, 0, 0) as usize);
+    pub(super) unsafe fn account_page_entered(&mut self) {
+        self.account.panel = Panel::for_page(self.page);
         self.account.page = 0;
         self.account.cursors = vec![String::new()];
         self.account.view = Value::Null;
         self.account.detail = Value::Null;
         self.account.copied = Zeroizing::new(String::new());
         self.set(DETAILS, "");
+        self.set(FEEDBACK, "");
         self.render_account();
-        if let Err(e) = self.account_load(0, String::new()) {
+        self.account.refresh_pending = self.account.logged_in();
+        if self.account.refresh_pending
+            && self.account.task.is_none()
+            && let Err(e) = self.account_load(0, String::new())
+        {
             self.set(FEEDBACK, &e.to_string());
         }
     }
@@ -447,6 +434,7 @@ impl App {
         let client = self.account.client.clone().context("请先登录")?;
         let sender = self.sender.clone();
         let method = method.to_owned();
+        let panel = self.account.panel;
         self.account.task = Some(self.runtime.spawn(async move {
             let result = if action == Action::Load {
                 client.load(&route).await
@@ -455,6 +443,7 @@ impl App {
             };
             let _ = sender.send(Event::Account(Reply {
                 action,
+                panel,
                 page,
                 cursor,
                 result,
@@ -465,6 +454,7 @@ impl App {
         Ok(())
     }
     unsafe fn account_load(&mut self, page: usize, cursor: String) -> Result<()> {
+        self.account.refresh_pending = false;
         self.submit_account(
             Action::Load,
             "GET",
@@ -492,6 +482,10 @@ impl App {
         Ok(self.account.attempt.as_ref().unwrap().1.clone())
     }
     pub(super) unsafe fn account_action(&mut self, id: u16) -> Result<()> {
+        if id == GO_LOGIN {
+            self.select_page(ACCOUNT_PAGE);
+            return Ok(());
+        }
         if self.account.task.is_some() {
             return Ok(());
         }
@@ -570,11 +564,6 @@ impl App {
                     self.account.page,
                     self.account.cursors[self.account.page].clone(),
                 );
-            }
-            RECHARGE => {
-                SendMessageW(TAB.hwnd(self), CB_SETCURSEL, 2, 0);
-                self.account_tab_changed();
-                return Ok(());
             }
             LOGOUT => {
                 action = Action::Logout;
@@ -821,25 +810,21 @@ impl App {
                 .cloned()
                 .unwrap_or_default();
             let application = apps.iter().find(|a| a["kind"] == "user");
+            self.set(BALANCE, &format!("可用余额　{}", money(&available)));
             self.set(
                 SUMMARY,
                 &format!(
-                    "可用余额　{}\r\n\r\n累计消费　{}\r\n\r\n名称　{}\r\n\r\n开通状态　{}{}",
-                    money(&available),
-                    money(&balance["spent_microusd"]),
+                    "名称　{}\r\n\r\n开通状态　{}\r\n\r\n管理平台　{}",
                     text(&self.account.me["account"]["name"]),
                     application
                         .map(|a| status(&a["status"]))
                         .unwrap_or_else(|| "—".into()),
-                    if self.account.me["sync_error"] == true {
-                        "\r\n\r\n最新账务尚待同步"
-                    } else {
-                        ""
-                    }
+                    self.account.base,
                 ),
             );
         } else {
             self.set(SUMMARY, "");
+            self.set(BALANCE, "");
         }
         let panel = self.account.panel;
         let source = if !logged {
@@ -1008,19 +993,39 @@ impl App {
                 }
                 self.set(FEEDBACK, &error.message);
                 self.account_busy();
+                self.finish_account_refresh();
                 return;
             }
         };
         if matches!(action, Action::NewKey | Action::Payment) {
             self.account.attempt = None;
         }
+        // A page switch does not cancel a sent mutation. Complete it, but keep
+        // its response out of the newly selected page and then read that page.
+        if (reply.panel != self.account.panel || self.account.refresh_pending)
+            && matches!(
+                action,
+                Action::Load
+                    | Action::Reveal
+                    | Action::Receipt
+                    | Action::Payment
+                    | Action::CheckPayment
+            )
+        {
+            if action == Action::Load {
+                self.account.me = value["me"].clone();
+            }
+            self.render_account();
+            self.finish_account_refresh();
+            return;
+        }
         let mut followup = false;
         match action {
             Action::Login | Action::Register => {
                 self.account.me = value;
-                self.account.panel = Panel::Overview;
                 self.account.register = false;
-                SendMessageW(TAB.hwnd(self), CB_SETCURSEL, 0, 0);
+                self.account.refresh_pending =
+                    is_account_page(self.page) && self.page != ACCOUNT_PAGE;
                 let save = (|| -> Result<()> {
                     std::fs::create_dir_all(self.path.parent().unwrap())?;
                     std::fs::write(
@@ -1078,6 +1083,9 @@ impl App {
                 self.set(NEW_PASSWORD, "");
                 self.set(SUBMIT, "登录");
                 self.set(SWITCH, "注册新账号");
+                if is_account_page(self.page) {
+                    self.select_page(ACCOUNT_PAGE);
+                }
                 self.render_account();
                 self.set(
                     FEEDBACK,
@@ -1133,12 +1141,24 @@ impl App {
         }
         self.account_busy();
         if followup
+            && is_account_page(self.page)
             && let Err(e) = self.account_load(
                 self.account.page,
                 self.account.cursors[self.account.page].clone(),
             )
         {
             self.set(FEEDBACK, &e.to_string());
+        }
+        self.finish_account_refresh();
+    }
+    unsafe fn finish_account_refresh(&mut self) {
+        if self.account.refresh_pending
+            && self.account.task.is_none()
+            && self.account.logged_in()
+            && is_account_page(self.page)
+            && let Err(error) = self.account_load(0, String::new())
+        {
+            self.set(FEEDBACK, &error.to_string());
         }
     }
     unsafe fn apply_account_key(&mut self, key: &str) -> Result<()> {
@@ -1162,7 +1182,7 @@ impl App {
         Ok(())
     }
     pub(super) unsafe fn account_poll(&mut self) {
-        if self.page == ACCOUNT_PAGE
+        if is_account_page(self.page)
             && IsWindowVisible(self.hwnd) != 0
             && self.account.logged_in()
             && self.account.task.is_none()
@@ -1293,19 +1313,23 @@ mod tests {
             .unwrap();
             complete(&mut app);
             assert!(app.account.logged_in());
-            assert!(app.text(SUMMARY).contains("$19.499999"));
+            assert!(!app.text(SUMMARY).contains("$19.499999"));
+            assert!(app.text(BALANCE).contains("$19.499999"));
             assert!(!app.account.visible(USERNAME.hwnd(&app)));
-            assert!(app.account.visible(TAB.hwnd(&app)));
-            SendMessageW(TAB.hwnd(&app), CB_SETCURSEL, 1, 0);
-            app.account_tab_changed();
+            assert!(app.account.visible(IDENTITY.hwnd(&app)));
+            app.select_page(KEYS_PAGE);
             complete(&mut app);
             assert_eq!(app.account.rows.len(), 1);
             assert_eq!(app.account.rows[0]["label"], "Laptop");
             assert!(!app.account.visible(PAY.hwnd(&app)));
-            SendMessageW(TAB.hwnd(&app), CB_SETCURSEL, 2, 0);
-            app.account_tab_changed();
+            // Switch before the previous fetch completes. Its key list must not
+            // be rendered under the payments heading when the response arrives.
+            app.select_page(KEYS_PAGE);
+            app.select_page(PAYMENTS_PAGE);
             complete(&mut app);
             assert_eq!(app.account.channels.len(), 1);
+            assert!(app.account.rows.is_empty());
+            assert_eq!(app.text(PAGE_TITLE), "余额与充值");
             assert!(app.account.visible(PAY.hwnd(&app)));
             let operation = app.account_operation("payment:tron:10".into()).unwrap();
             assert_eq!(
@@ -1334,6 +1358,12 @@ mod tests {
             assert_eq!(app.account.rows.len(), 1);
             assert!(app.text(DETAILS).contains("10.000123"));
             assert_eq!(app.account.copied.as_str(), "fixture-address");
+            app.select_page(SECURITY_PAGE);
+            complete(&mut app);
+            assert!(app.account.visible(CURRENT.hwnd(&app)));
+            assert!(!app.account.visible(TABLE.hwnd(&app)));
+            assert!(!app.account.visible(PAY.hwnd(&app)));
+            assert_eq!(app.text(PAGE_TITLE), "账号安全");
             app.account_action(LOGOUT).unwrap();
             complete(&mut app);
             assert!(!app.account.logged_in());
@@ -1343,6 +1373,12 @@ mod tests {
             assert!(app.text(DETAILS).is_empty());
             assert!(app.account.visible(USERNAME.hwnd(&app)));
             assert!(!app.account.visible(TABLE.hwnd(&app)));
+            app.select_page(RECEIPTS_PAGE);
+            assert!(app.account.visible(GO_LOGIN.hwnd(&app)));
+            assert!(!app.account.visible(USERNAME.hwnd(&app)));
+            app.account_action(GO_LOGIN).unwrap();
+            assert_eq!(app.page, ACCOUNT_PAGE);
+            assert!(app.account.visible(USERNAME.hwnd(&app)));
             server.abort();
             DestroyWindow(app.hwnd);
             std::fs::remove_file(root.join("account-platform.json")).unwrap();

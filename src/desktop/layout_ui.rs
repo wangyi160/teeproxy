@@ -4,15 +4,15 @@ use super::*;
 
 pub(super) const NAV_FIRST: u16 = 501;
 pub(super) const NAV_LAST: u16 = NAV_FIRST + PAGES.len() as u16 - 1;
-pub(super) const PAGE_TITLE: u16 = 509;
-pub(super) const PAGE_DESCRIPTION: u16 = 510;
-pub(super) const OPEN_SETTINGS: u16 = 511;
-pub(super) const SERVICE_STATE: u16 = 512;
-pub(super) const ROUTER_SUMMARY: u16 = 514;
-pub(super) const MODELS_EMPTY: u16 = 515;
-pub(super) const ACCOUNTS_EMPTY: u16 = 516;
-pub(super) const MODEL_COUNT: u16 = 517;
-pub(super) const POOL_COUNT: u16 = 518;
+pub(super) const PAGE_TITLE: u16 = 559;
+pub(super) const PAGE_DESCRIPTION: u16 = 560;
+pub(super) const OPEN_SETTINGS: u16 = 561;
+pub(super) const SERVICE_STATE: u16 = 562;
+pub(super) const ROUTER_SUMMARY: u16 = 564;
+pub(super) const MODELS_EMPTY: u16 = 565;
+pub(super) const ACCOUNTS_EMPTY: u16 = 566;
+pub(super) const MODEL_COUNT: u16 = 567;
+pub(super) const POOL_COUNT: u16 = 568;
 pub(super) const OVERVIEW: usize = 0;
 pub(super) const INVENTORY_PAGE: usize = 1;
 pub(super) const SETTINGS_PAGE: usize = 2;
@@ -20,7 +20,17 @@ pub(super) const LOG_PAGE: usize = 3;
 pub(super) const ROUTE_PAGE: usize = 4;
 pub(super) const PRICE_PAGE: usize = 5;
 pub(super) const ACCOUNT_PAGE: usize = 6;
-const PAGES: [(&str, &str); 7] = [
+pub(super) const KEYS_PAGE: usize = 7;
+pub(super) const PAYMENTS_PAGE: usize = 8;
+pub(super) const FINANCE_PAGE: usize = 9;
+pub(super) const RECEIPTS_PAGE: usize = 10;
+pub(super) const ACCESS_PAGE: usize = 11;
+pub(super) const SECURITY_PAGE: usize = 12;
+pub(super) const JOURNAL_PAGE: usize = 13;
+pub(super) fn is_account_page(page: usize) -> bool {
+    (ACCOUNT_PAGE..=JOURNAL_PAGE).contains(&page)
+}
+const PAGES: [(&str, &str); 14] = [
     ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
     (
         "账号与模型",
@@ -33,7 +43,14 @@ const PAGES: [(&str, &str); 7] = [
         "官方价格",
         "查看 Router 发布的完整官方价格，不受账号池和账号是否存在影响。",
     ),
-    ("我的账户", "注册登录、余额充值、API key 和消费凭据。"),
+    ("登录与身份", ""),
+    ("API key", ""),
+    ("余额与充值", ""),
+    ("消费明细", ""),
+    ("消费凭据", ""),
+    ("商户授权", ""),
+    ("账号安全", ""),
+    ("资金记录", ""),
 ];
 
 impl App {
@@ -45,11 +62,22 @@ impl App {
         self.building_page = None;
         self.label("teeproxy", [64, 27, 130, 30], 3)?;
         self.label("安全连接 · 本地代理", [24, 68, 172, 22], 2)?;
+        self.label("代理", [32, 104, 144, 20], 2)?;
+        self.label("账户", [32, 344, 144, 20], 2)?;
         for (page, (title, _)) in PAGES.iter().enumerate() {
             self.button(
                 NAV_FIRST + page as u16,
                 title,
-                [16, 128 + page as i32 * 54, 176, 44],
+                [
+                    16,
+                    if page < ACCOUNT_PAGE {
+                        128 + page as i32 * 34
+                    } else {
+                        370 + (page - ACCOUNT_PAGE) as i32 * 34
+                    },
+                    176,
+                    32,
+                ],
                 0,
             )?;
         }
@@ -292,7 +320,13 @@ impl App {
                     self.page == INVENTORY_PAGE
                         && self.account_pool().is_none_or(|p| p.account_count == 0)
                 }
-                _ => control.page.is_none_or(|page| page == self.page),
+                _ => control.page.is_none_or(|page| {
+                    if page == ACCOUNT_PAGE {
+                        is_account_page(self.page)
+                    } else {
+                        page == self.page
+                    }
+                }),
             };
             let visible = visible
                 && (control.page != Some(ACCOUNT_PAGE) || self.account.visible(control.hwnd));
@@ -301,7 +335,7 @@ impl App {
     }
 
     pub(super) unsafe fn select_page(&mut self, page: usize) {
-        self.page = page.min(ACCOUNT_PAGE);
+        self.page = page.min(PAGES.len() - 1);
         self.set(
             REFRESH,
             if self.page == PRICE_PAGE {
@@ -313,6 +347,9 @@ impl App {
         let (title, description) = PAGES[self.page];
         self.set(PAGE_TITLE, title);
         self.set(PAGE_DESCRIPTION, description);
+        if is_account_page(self.page) {
+            self.account_page_entered();
+        }
         self.update_visibility();
         self.layout();
         InvalidateRect(self.hwnd, ptr::null(), 1);
@@ -326,6 +363,11 @@ impl App {
         if let Some(c) = self.controls.iter().find(|c| c.hwnd == hwnd) {
             if c.rect[0] >= 0 && c.rect[0] < 208 {
                 return rgb(241, 244, 249);
+            }
+            if c.page == Some(ACCOUNT_PAGE)
+                && !self.input_frames.iter().any(|(_, _, input)| *input == hwnd)
+            {
+                return rgb(248, 250, 253);
             }
             if c.page.is_some()
                 && !matches!(
@@ -390,8 +432,13 @@ impl App {
             );
         }
         for (rect, page, hwnd) in &self.input_frames {
-            if page.is_none_or(|page| page == self.page)
-                && GetWindowLongPtrW(*hwnd, GWL_STYLE) & WS_VISIBLE as isize != 0
+            if page.is_none_or(|page| {
+                if page == ACCOUNT_PAGE {
+                    is_account_page(self.page)
+                } else {
+                    page == self.page
+                }
+            }) && GetWindowLongPtrW(*hwnd, GWL_STYLE) & WS_VISIBLE as isize != 0
             {
                 rounded(
                     dc,
@@ -470,6 +517,7 @@ impl App {
         let flags = if nav {
             let symbols: [&str; PAGES.len()] = [
                 "\u{e80f}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}", "\u{e77b}",
+                "\u{e192}", "\u{e8c7}", "\u{e9d9}", "\u{e8a5}", "\u{e8d7}", "\u{e72e}", "\u{e81c}",
             ];
             let mut icon = rect;
             icon.left += self.scale(16);

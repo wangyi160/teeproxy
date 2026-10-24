@@ -608,7 +608,7 @@ impl App {
             return Ok(());
         }
         match id {
-            1511..=1542 => return self.account_action(id),
+            1511..=1543 => return self.account_action(id),
             NAV_FIRST..=NAV_LAST => {
                 self.select_page((id - NAV_FIRST) as usize);
                 if self.page == PRICE_PAGE
@@ -1037,10 +1037,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
-                if id == account_ui::TAB && notification == CBN_SELCHANGE as u16 {
-                    app.account_tab_changed();
-                    return 0;
-                }
                 if (id == PRICE_SEARCH && notification == EN_CHANGE as u16)
                     || (id == PRICE_PROVIDER && notification == CBN_SELCHANGE as u16)
                 {
@@ -1097,7 +1093,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                         || matches!(id, tray::OPEN | tray::TOGGLE | tray::EXIT))
                     && let Err(error) = app.action(id)
                 {
-                    if (1511..=1542).contains(&id) {
+                    if (1511..=1543).contains(&id) {
                         app.account_error(&error);
                     } else {
                         app.action_failed(id, &error);
