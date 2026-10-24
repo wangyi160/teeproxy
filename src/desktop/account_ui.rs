@@ -29,7 +29,6 @@ const DETAIL: u16 = 1532;
 const COPY: u16 = 1533;
 const PREV: u16 = 1534;
 const NEXT: u16 = 1535;
-const ACCESS: u16 = 1536;
 const CURRENT: u16 = 1537;
 const NEW_PASSWORD: u16 = 1538;
 const CHANGE_PASSWORD: u16 = 1539;
@@ -46,7 +45,6 @@ pub(super) enum Panel {
     Payments,
     Finance,
     Receipts,
-    Access,
     Security,
     Journal,
 }
@@ -57,7 +55,6 @@ impl Panel {
             PAYMENTS_PAGE => Self::Payments,
             FINANCE_PAGE => Self::Finance,
             RECEIPTS_PAGE => Self::Receipts,
-            ACCESS_PAGE => Self::Access,
             SECURITY_PAGE => Self::Security,
             JOURNAL_PAGE => Self::Journal,
             _ => Self::Overview,
@@ -112,7 +109,6 @@ pub(super) enum Action {
     Payment,
     CheckPayment,
     Receipt,
-    Access,
 }
 pub(super) struct Reply {
     action: Action,
@@ -347,9 +343,6 @@ impl App {
         self.button(PAY, "创建充值订单", [614, 232, 150, 38], 0)?;
         self.button(COPY_AMOUNT, "复制付款金额", [492, -122, 150, 34], 0)?;
         self.account_group(start, Group::Panel(Panel::Payments));
-        let start = self.controls.len();
-        self.button(ACCESS, "申请使用所选商户", [260, 238, 190, 38], 0)?;
-        self.account_group(start, Group::Panel(Panel::Access));
         let start = self.controls.len();
         self.label("当前密码", [268, 250, 160, 24], 0)?;
         self.edit(CURRENT, "", [268, 282, 460, 40], ES_PASSWORD as u32, "")?;
@@ -651,14 +644,6 @@ impl App {
                 route = "payments".into();
                 body = json!({"amount":amount,"network":network});
             }
-            ACCESS => {
-                let row = self.chosen_account_row()?;
-                ensure!(row["authorized"] != true, "已经获得该商户授权");
-                action = Action::Access;
-                method = "POST";
-                route = "access".into();
-                body = json!({"merchant_id":row["id"]});
-            }
             CHANGE_PASSWORD => {
                 let current = Zeroizing::new(self.text(CURRENT));
                 let next = Zeroizing::new(self.text(NEW_PASSWORD));
@@ -731,15 +716,6 @@ impl App {
                         .unwrap_or(&row["key_error"])
                 ),
                 date(&row["created_at"])
-            ),
-            Panel::Access => format!(
-                "商户：{}\r\n状态：{}",
-                text(&row["name"]),
-                if row["authorized"] == true {
-                    "已授权"
-                } else {
-                    "未授权"
-                }
             ),
             Panel::Journal => format!(
                 "记录：{}\r\n金额：{}\r\n时间：{}",
@@ -833,7 +809,6 @@ impl App {
             Value::Null
         } else {
             match panel {
-                Panel::Access => self.account.me["merchants"].clone(),
                 Panel::Journal => self.account.view["journal"]["data"].clone(),
                 _ => self.account.view["data"].clone(),
             }
@@ -842,7 +817,6 @@ impl App {
         let headings = match panel {
             Panel::Keys => ["名称", "API key", "状态", "创建时间", ""],
             Panel::Payments => ["时间", "网络", "付款金额 USDT", "状态", "订单"],
-            Panel::Access => ["商户", "状态", "", "", ""],
             Panel::Journal => ["时间", "类型", "金额 USD", "编号", ""],
             _ => ["时间", "模型 / 账号池", "金额 USD", "状态", "流水"],
         };
@@ -891,25 +865,6 @@ impl App {
                     ),
                     status(&row["state"]),
                     text(&row["id"]),
-                ],
-                Panel::Access => vec![
-                    text(&row["name"]),
-                    if row["authorized"] == true {
-                        "已授权".into()
-                    } else if self.account.me["applications"].as_array().is_some_and(|a| {
-                        a.iter().any(|a| {
-                            a["kind"] == "access"
-                                && a["subject"] == row["id"]
-                                && a["status"] == "pending"
-                        })
-                    }) {
-                        "待审核".into()
-                    } else {
-                        "未授权".into()
-                    },
-                    String::new(),
-                    String::new(),
-                    String::new(),
                 ],
                 Panel::Journal => vec![
                     date(&row["created_at"]),

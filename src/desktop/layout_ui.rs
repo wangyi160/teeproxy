@@ -24,13 +24,12 @@ pub(super) const KEYS_PAGE: usize = 7;
 pub(super) const PAYMENTS_PAGE: usize = 8;
 pub(super) const FINANCE_PAGE: usize = 9;
 pub(super) const RECEIPTS_PAGE: usize = 10;
-pub(super) const ACCESS_PAGE: usize = 11;
-pub(super) const SECURITY_PAGE: usize = 12;
-pub(super) const JOURNAL_PAGE: usize = 13;
+pub(super) const SECURITY_PAGE: usize = 11;
+pub(super) const JOURNAL_PAGE: usize = 12;
 pub(super) fn is_account_page(page: usize) -> bool {
     (ACCOUNT_PAGE..=JOURNAL_PAGE).contains(&page)
 }
-const PAGES: [(&str, &str); 14] = [
+const PAGES: [(&str, &str); 13] = [
     ("概览", "连接你的 Agent，查看本地代理的运行状态。"),
     (
         "账号与模型",
@@ -48,7 +47,6 @@ const PAGES: [(&str, &str); 14] = [
     ("余额与充值", ""),
     ("消费明细", ""),
     ("消费凭据", ""),
-    ("商户授权", ""),
     ("账号安全", ""),
     ("资金记录", ""),
 ];
@@ -517,7 +515,7 @@ impl App {
         let flags = if nav {
             let symbols: [&str; PAGES.len()] = [
                 "\u{e80f}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}", "\u{e77b}",
-                "\u{e192}", "\u{e8c7}", "\u{e9d9}", "\u{e8a5}", "\u{e8d7}", "\u{e72e}", "\u{e81c}",
+                "\u{e192}", "\u{e8c7}", "\u{e9d9}", "\u{e8a5}", "\u{e72e}", "\u{e81c}",
             ];
             let mut icon = rect;
             icon.left += self.scale(16);

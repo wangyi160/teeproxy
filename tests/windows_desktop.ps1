@@ -95,10 +95,10 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(501,502,503,504,505,506,507,508,509,510,511,512,513,514,559,560,1511,1512,1513,1514,1515,1516,1522,1543,302,303,304,307,310,312,313,314,315,316,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
+    foreach ($id in @(501,502,503,504,505,506,507,508,509,510,511,512,513,559,560,1511,1512,1513,1514,1515,1516,1522,1543,302,303,304,307,310,312,313,314,315,316,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
-    foreach ($id in @(104,309,311,603,604,608,1510,1517)) {
+    foreach ($id in @(104,309,311,514,603,604,608,1510,1517,1536)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -ne [IntPtr]::Zero) { throw "Removed routing control $id still exists" }
     }
     if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,605))) { throw 'Fixed pool maximum is disabled' }
@@ -117,7 +117,7 @@ try {
     $identityTitle = Read-Control 559
     $accountTitles = [Collections.Generic.HashSet[string]]::new()
     [void]$accountTitles.Add($identityTitle)
-    foreach ($page in 7..13) {
+    foreach ($page in 7..12) {
         Select-Page $page
         if (-not $accountTitles.Add((Read-Control 559))) { throw 'Account sidebar reused another page title' }
         if (-not (Control-Shown 1543) -or (Control-Shown 1512) -or (Control-Shown 1522)) { throw 'Logged-out account page displayed private data or the identity form' }

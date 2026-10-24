@@ -66,10 +66,9 @@ fn allowed(method: &str, route: &str) -> bool {
         ("GET", ["receipts", "records", seq]) => {
             !seq.is_empty() && seq.bytes().all(|c| c.is_ascii_digit())
         }
-        (
-            "POST",
-            ["login" | "register" | "logout" | "password" | "keys" | "access" | "payments"],
-        ) => !route.contains('?'),
+        ("POST", ["login" | "register" | "logout" | "password" | "keys" | "payments"]) => {
+            !route.contains('?')
+        }
         ("GET", ["payments", key])
         | ("POST", ["payments", key, "refresh"])
         | ("POST", ["keys", key, "reveal"])
