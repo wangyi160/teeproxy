@@ -3,9 +3,7 @@
 use super::*;
 
 pub(super) const NAV_FIRST: u16 = 501;
-pub(super) const NAV_LAST: u16 = 507;
-pub(super) const OPEN_ACCOUNT: u16 = 1510;
-pub(super) const ACCOUNT_PLATFORM: u16 = 1511;
+pub(super) const NAV_LAST: u16 = NAV_FIRST + PAGES.len() as u16 - 1;
 pub(super) const PAGE_TITLE: u16 = 509;
 pub(super) const PAGE_DESCRIPTION: u16 = 510;
 pub(super) const OPEN_SETTINGS: u16 = 511;
@@ -248,15 +246,7 @@ impl App {
         self.building_page = None;
         self.build_routing(profile)?;
         self.build_pricing()?;
-        self.building_page = Some(ACCOUNT_PAGE);
-        self.label("管理平台地址", [268, 160, 200, 28], 0)?;
-        let platform = std::fs::read(self.path.parent().unwrap().join("account-platform.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<String>(&bytes).ok())
-            .unwrap_or_else(|| "https://teerouter.org".into());
-        self.edit(ACCOUNT_PLATFORM, &platform, [268, 202, -328, 38], 0, "")?;
-        self.button(OPEN_ACCOUNT, "打开我的账户", [268, 270, 190, 42], 0)?;
-        self.building_page = None;
+        self.build_account()?;
         self.update_summary();
         Ok(())
     }
@@ -304,6 +294,8 @@ impl App {
                 }
                 _ => control.page.is_none_or(|page| page == self.page),
             };
+            let visible = visible
+                && (control.page != Some(ACCOUNT_PAGE) || self.account.visible(control.hwnd));
             ShowWindow(control.hwnd, if visible { SW_SHOW } else { SW_HIDE });
         }
     }
@@ -398,7 +390,9 @@ impl App {
             );
         }
         for (rect, page, hwnd) in &self.input_frames {
-            if page.is_none_or(|page| page == self.page) {
+            if page.is_none_or(|page| page == self.page)
+                && GetWindowLongPtrW(*hwnd, GWL_STYLE) & WS_VISIBLE as isize != 0
+            {
                 rounded(
                     dc,
                     &self.scaled_rect(*rect, width, height),
@@ -474,8 +468,8 @@ impl App {
         rounded(dc, &item.rcItem, self.scale(7), fill, border);
         let mut rect = item.rcItem;
         let flags = if nav {
-            let symbols = [
-                "\u{e80f}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}",
+            let symbols: [&str; PAGES.len()] = [
+                "\u{e80f}", "\u{e716}", "\u{e713}", "\u{e81c}", "\u{e8ab}", "\u{e8d4}", "\u{e77b}",
             ];
             let mut icon = rect;
             icon.left += self.scale(16);

@@ -95,13 +95,27 @@ function Close-TestWindow {
 }
 try {
     Open-TestWindow
-    foreach ($id in @(501,502,503,504,505,506,302,303,304,307,310,312,313,314,315,316,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
+    foreach ($id in @(501,502,503,504,505,506,507,1511,1512,1513,1514,1515,1516,1517,1522,302,303,304,307,310,312,313,314,315,316,601,602,605,606,607,609,701,702,703,704,705,706,707)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -eq [IntPtr]::Zero) { throw "Missing native inventory control $id" }
     }
-    foreach ($id in @(104,309,311,507,603,604,608)) {
+    foreach ($id in @(104,309,311,603,604,608,1510)) {
         if ([TeeproxyUi]::GetDlgItem($script:window,$id) -ne [IntPtr]::Zero) { throw "Removed routing control $id still exists" }
     }
     if (-not [TeeproxyUi]::IsWindowEnabled([TeeproxyUi]::GetDlgItem($script:window,605))) { throw 'Fixed pool maximum is disabled' }
+    Select-Page 6
+    if (-not (Control-Shown 1512) -or -not (Control-Shown 1513) -or (Control-Shown 1514) -or (Control-Shown 1522) -or (Control-Shown 701)) { throw 'Native login form visibility failed' }
+    if (([TeeproxyUi]::GetStyle([TeeproxyUi]::GetDlgItem($script:window,1513),-16).ToInt64() -band 0x20) -eq 0) { throw 'Account password is not masked' }
+    Set-Control 1513 'temporary-draft-password'
+    Click-Control 1516
+    if (-not (Control-Shown 1514) -or (Read-Control 1513)) { throw 'Register switch did not clear password or reveal name' }
+    Set-Control 1512 'test-native'
+    Set-Control 1513 'short'
+    Click-Control 1515
+    if ((Read-Control 1524).Length -eq 0 -or (Control-Shown 1522)) { throw 'Native register validation failed' }
+    Click-Control 1516
+    if ((Control-Shown 1514) -or (Read-Control 1513)) { throw 'Login switch did not hide registration fields or clear password' }
+    $accountListeners = @(Get-NetTCPConnection -State Listen -OwningProcess $script:appProcess.Id -ErrorAction SilentlyContinue)
+    if ($accountListeners.Count) { throw 'Native account UI unexpectedly opened a local HTTP listener' }
     Select-Page 5
     if (-not (Control-Shown 701) -or -not (Control-Shown 702) -or -not (Control-Shown 704) -or (Control-Shown 302) -or (Control-Shown 312)) { throw 'Official pricing page visibility failed' }
     Select-Page 1

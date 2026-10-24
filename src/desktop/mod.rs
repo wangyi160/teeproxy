@@ -1,7 +1,8 @@
 //! Native Win32 frontend. All HWNDs and UI state stay on the message-loop thread.
 //! Workers send owned messages; no window pointer crosses a thread boundary.
 #![allow(unsafe_op_in_unsafe_fn)]
-mod account_service;
+mod account_client;
+mod account_ui;
 pub(crate) mod catalog;
 mod inventory_ui;
 mod layout_ui;
@@ -59,10 +60,7 @@ const FIELDS: [u16; 10] = [
 ];
 
 enum Event {
-    AccountKey(
-        Zeroizing<String>,
-        tokio::sync::oneshot::Sender<std::result::Result<(), String>>,
-    ),
+    Account(account_ui::Reply),
     Started(u64, String, std::sync::Arc<Proxy>),
     Verified(u64, bool, Vec<String>),
     Failed(u64, String),
@@ -79,7 +77,7 @@ struct Control {
     page: Option<usize>,
 }
 struct App {
-    account_server: Option<(String, String, JoinHandle<()>)>,
+    account: account_ui::State,
     hwnd: HWND,
     controls: Vec<Control>,
     input_frames: Vec<([i32; 4], Option<usize>, HWND)>,
@@ -124,7 +122,7 @@ impl App {
             .build()?;
         let (sender, receiver) = mpsc::channel();
         Ok(Self {
-            account_server: None,
+            account: account_ui::State::default(),
             hwnd: ptr::null_mut(),
             controls: Vec::new(),
             input_frames: Vec::new(),
@@ -243,6 +241,9 @@ pub fn run(path: Option<PathBuf>) -> Result<()> {
         task.abort();
     }
     if let Some(task) = app.inventory_task.take() {
+        task.abort();
+    }
+    if let Some(task) = app.account.task.take() {
         task.abort();
     }
     app.tray.take();
@@ -607,37 +608,7 @@ impl App {
             return Ok(());
         }
         match id {
-            OPEN_ACCOUNT => {
-                let base = account_service::platform(&self.text(ACCOUNT_PLATFORM))?;
-                std::fs::create_dir_all(self.path.parent().unwrap())?;
-                let path = self.path.parent().unwrap().join("account-platform.json");
-                std::fs::write(path, serde_json::to_vec(&base)?)?;
-                if self
-                    .account_server
-                    .as_ref()
-                    .is_some_and(|(old, _, _)| old != &base)
-                    && let Some((_, _, task)) = self.account_server.take()
-                {
-                    task.abort();
-                }
-                if self.account_server.is_none() {
-                    let (url, task) = self
-                        .runtime
-                        .block_on(account_service::start(&base, self.sender.clone()))?;
-                    self.account_server = Some((base, url, task));
-                }
-                let url = &self.account_server.as_ref().unwrap().1;
-                let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
-                let result = windows_sys::Win32::UI::Shell::ShellExecuteW(
-                    self.hwnd,
-                    w!("open"),
-                    wide.as_ptr(),
-                    ptr::null(),
-                    ptr::null(),
-                    SW_SHOWNORMAL,
-                );
-                ensure!((result as isize) > 32, "无法打开本机账户页面");
-            }
+            1511..=1542 => return self.account_action(id),
             NAV_FIRST..=NAV_LAST => {
                 self.select_page((id - NAV_FIRST) as usize);
                 if self.page == PRICE_PAGE
@@ -804,28 +775,7 @@ impl App {
     unsafe fn poll(&mut self) {
         while let Ok(event) = self.receiver.try_recv() {
             match event {
-                Event::AccountKey(key, reply) => {
-                    let result = (|| -> Result<()> {
-                        ensure!(
-                            self.task.is_none() && self.inventory_task.is_none(),
-                            "请先停止代理并等待当前操作完成，再切换 API key"
-                        );
-                        let (mut profile, mut secrets) = settings::load(&self.path)?;
-                        if profile.router.is_empty() {
-                            profile.router = "https://router.teerouter.org".into();
-                        }
-                        secrets.router_key = key.to_string();
-                        settings::save(&self.path, &profile, &secrets)?;
-                        self.set(ROUTER_KEY, &key);
-                        if self.text(ROUTER).is_empty() {
-                            self.set(ROUTER, &profile.router);
-                        }
-                        self.status("平台 API key 已保存", rgb(30, 94, 166));
-                        Ok(())
-                    })()
-                    .map_err(|error| error.to_string());
-                    let _ = reply.send(result);
-                }
+                Event::Account(reply) => self.account_reply(reply),
                 Event::Prices(generation, result) if generation == self.inventory_generation => {
                     self.inventory_task.take();
                     match result {
@@ -1069,6 +1019,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                 if header.idFrom == PRICES as usize && header.code == LVN_ITEMCHANGED {
                     app.price_selection_changed();
                 }
+                if header.idFrom == account_ui::TABLE as usize && header.code == LVN_ITEMCHANGED {
+                    let change = &*(lp as *const NMLISTVIEW);
+                    if change.uChanged & LVIF_STATE != 0 && change.uNewState & LVIS_SELECTED != 0 {
+                        app.account_selection_changed();
+                    }
+                }
                 if header.idFrom == POOLS as usize && header.code == LVN_ITEMCHANGED {
                     let change = &*(lp as *const NMLISTVIEW);
                     if change.uChanged & LVIF_STATE != 0
@@ -1081,6 +1037,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
+                if id == account_ui::TAB && notification == CBN_SELCHANGE as u16 {
+                    app.account_tab_changed();
+                    return 0;
+                }
                 if (id == PRICE_SEARCH && notification == EN_CHANGE as u16)
                     || (id == PRICE_PROVIDER && notification == CBN_SELCHANGE as u16)
                 {
@@ -1137,12 +1097,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                         || matches!(id, tray::OPEN | tray::TOGGLE | tray::EXIT))
                     && let Err(error) = app.action(id)
                 {
-                    app.action_failed(id, &error);
+                    if (1511..=1542).contains(&id) {
+                        app.account_error(&error);
+                    } else {
+                        app.action_failed(id, &error);
+                    }
                 }
                 return 0;
             }
             WM_TIMER => {
                 app.poll();
+                app.account_poll();
                 return 0;
             }
             WM_SIZE => {

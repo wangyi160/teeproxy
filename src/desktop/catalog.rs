@@ -79,7 +79,7 @@ impl Probe {
         )
     }
 }
-fn checked_time(seconds: u64) -> Option<String> {
+pub(super) fn checked_time(seconds: u64) -> Option<String> {
     use windows_sys::Win32::{
         Foundation::{FILETIME, SYSTEMTIME},
         System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime},
