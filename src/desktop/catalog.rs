@@ -216,25 +216,15 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             "账号记录过多"
         );
         ensure!(!result.pools.iter().any(|p| p.id == name), "账号池 ID 重复");
-        let state = if accounts.is_empty() {
-            "无账号"
-        } else if accounts
+        // The user directory contains only accounts Router reports as usable.
+        // Probe failures and occupied concurrency do not override this flag.
+        let accounts: Vec<_> = accounts
             .iter()
-            .any(|a| a["enabled"] != false && a["available"] == true)
-        {
-            "可用"
-        } else if accounts.iter().all(|a| a["enabled"] == false) {
-            "已停用"
-        } else if accounts.iter().any(|a| a["catalog"]["state"] == "error") {
-            "目录获取失败"
-        } else if accounts
-            .iter()
-            .any(|a| a["catalog"]["state"] == "refreshing")
-        {
-            "目录刷新中"
-        } else {
-            "暂不可用"
-        };
+            .filter(|a| a["enabled"] == true && a["available"] == true)
+            .collect();
+        if accounts.is_empty() {
+            continue;
+        }
         let label = [pool_name.as_str(), merchant.as_str(), rate.as_str()]
             .into_iter()
             .filter(|s| !s.is_empty())
@@ -247,7 +237,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             merchant_id: text(&pool["merchant_id"]),
             provider: provider(&pool["provider"]),
             multiplier: rate.clone(),
-            state: state.into(),
+            state: "可用".into(),
             label,
             account_count: accounts.len(),
             latency: Probe::parse(&pool["proxy_latency"]),
@@ -256,15 +246,6 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
             ensure!(result.accounts.len() < 10000, "账号记录过多");
             let id = text(&account["id"]);
             ensure!(!id.is_empty(), "账号目录缺少 ID");
-            let state = if account["enabled"] == false {
-                "已停用"
-            } else if account["available"] == true {
-                "可用"
-            } else if account["available"] == false {
-                "暂不可用"
-            } else {
-                "未知"
-            };
             let catalog = match account["catalog"]["state"].as_str() {
                 Some("fetched") => "已获取",
                 Some("refreshing") => "刷新中",
@@ -277,7 +258,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
                 pool: name.clone(),
                 id,
                 provider: provider(&account["provider"]),
-                state: state.into(),
+                state: "可用".into(),
                 catalog: catalog.into(),
                 models: account["catalog"]["visible_models"]
                     .as_u64()
@@ -427,9 +408,9 @@ mod tests {
     #[test]
     fn provider_namespaced_models_preserve_identity_across_merchant_pools() {
         let pools = json!({"data":[
-            {"id":"m_a.first","merchant_id":"m_a","provider":"openai","accounts":[]},
-            {"id":"m_b.second","merchant_id":"m_b","provider":"openai","accounts":[]},
-            {"id":"m_b.grok","merchant_id":"m_b","provider":"xai","accounts":[]}
+            {"id":"m_a.first","merchant_id":"m_a","provider":"openai","accounts":[{"id":"ready","enabled":true,"available":true}]},
+            {"id":"m_b.second","merchant_id":"m_b","provider":"openai","accounts":[{"id":"ready","enabled":true,"available":true}]},
+            {"id":"m_b.grok","merchant_id":"m_b","provider":"xai","accounts":[{"id":"ready","enabled":true,"available":true}]}
         ]});
         let models = json!({"data":[
             {"id":"chatgpt/shared-model","router_provider":"openai","router_model":"shared-model",
@@ -470,9 +451,9 @@ mod tests {
     #[test]
     fn models_are_scoped_to_authorized_pools_with_distinct_merchants_and_capabilities() {
         let pools = json!({"data":[
-            {"id":"m_a.cheap","pool_name":"cheap","merchant_id":"m_a","merchant_name":"Shop","provider":"openai","multiplier_millionths":200000,"accounts":[]},
-            {"id":"m_a.premium","pool_name":"premium","merchant_id":"m_a","merchant_name":"Shop","provider":"openai","multiplier_millionths":1000000,"accounts":[]},
-            {"id":"m_b.cheap","pool_name":"cheap","merchant_id":"m_b","merchant_name":"Shop","provider":"openai","multiplier_millionths":200000,"accounts":[]}
+            {"id":"m_a.cheap","pool_name":"cheap","merchant_id":"m_a","merchant_name":"Shop","provider":"openai","multiplier_millionths":200000,"accounts":[{"id":"ready","enabled":true,"available":true}]},
+            {"id":"m_a.premium","pool_name":"premium","merchant_id":"m_a","merchant_name":"Shop","provider":"openai","multiplier_millionths":1000000,"accounts":[{"id":"ready","enabled":true,"available":true}]},
+            {"id":"m_b.cheap","pool_name":"cheap","merchant_id":"m_b","merchant_name":"Shop","provider":"openai","multiplier_millionths":200000,"accounts":[{"id":"ready","enabled":true,"available":true}]}
         ]});
         let models = json!({"data":[
             {"id":"m_a/vendor/model","router_merchant":{"id":"m_a"},"router_pools":["m_a.cheap","m_a.premium","m_a.hidden"],"router_capabilities":[
@@ -515,28 +496,49 @@ mod tests {
         ] {
             assert_eq!(multiplier(&value), expected);
         }
-        let catalog = parse(&json!({"data":[]}), &json!({"data":[{"id":"m_id.pool","pool_name":"pool","merchant_name":"Shop","multiplier_millionths":200000,"accounts":[]}]})).unwrap();
+        let catalog = parse(&json!({"data":[]}), &json!({"data":[{"id":"m_id.pool","pool_name":"pool","merchant_name":"Shop","multiplier_millionths":200000,"accounts":[{"id":"ready","enabled":true,"available":true}]}]})).unwrap();
         let row = &catalog.pools[0];
         assert_eq!(row.id, "m_id.pool");
         assert_eq!(row.name, "pool");
         assert_eq!(row.merchant, "Shop");
         assert_eq!(row.multiplier, "0.2×");
-        assert_eq!(row.account_count, 0);
-        assert!(catalog.accounts.is_empty());
+        assert_eq!(row.account_count, 1);
+        assert_eq!(catalog.accounts.len(), 1);
     }
     #[test]
-    fn inventory_uses_public_fields_and_preserves_unavailable_accounts_and_empty_pools() {
-        let catalog = parse(&json!({"data":[{"id":"model-a","router_pools":["p"],"router_capabilities":[{"provider":"openai","protocols":["responses"]}]}]}),
-            &json!({"data":[{"id":"p","accounts":[{"id":"account-a","provider":"openai","enabled":true,"available":false,"catalog":{"state":"error","visible_models":0},"credential":"NEVER_DISPLAY"}]},{"id":"empty","accounts":[]}]})).unwrap();
+    fn inventory_hides_unusable_accounts_empty_pools_and_their_models() {
+        let models = json!({"data":[
+            {"id":"model-a","router_pools":["p","bad","empty"],"router_capabilities":[{"pool":"p","provider":"openai","protocols":["responses"]}]},
+            {"id":"model-b","router_pools":["bad"]}
+        ]});
+        let mut pools = json!({"data":[
+            {"id":"p","account_count":99,"accounts":[
+                {"id":"ready","provider":"openai","enabled":true,"available":true,"catalog":{"state":"fetched","visible_models":1},"proxy_latency":{"status":"failed"}},
+                {"id":"disabled","enabled":false,"available":true},
+                {"id":"expired","enabled":true,"available":false,"credential":"NEVER_DISPLAY"},
+                {"id":"unknown","enabled":true}
+            ]},
+            {"id":"bad","accounts":[{"id":"unavailable","enabled":true,"available":false}]},
+            {"id":"empty","accounts":[]}
+        ]});
+        let catalog = parse(&models, &pools).unwrap();
+        assert_eq!(catalog.models.len(), 1);
         assert_eq!(catalog.models[0].id, "model-a");
         assert_eq!(catalog.models[0].protocols, "responses");
         assert_eq!(catalog.accounts.len(), 1);
-        assert_eq!(catalog.accounts[0].state, "暂不可用");
-        assert_eq!(catalog.accounts[0].catalog, "获取失败");
-        assert_eq!(catalog.pools[0].state, "无账号");
-        assert_eq!(catalog.pools[0].account_count, 0);
-        assert_eq!(catalog.pools[1].account_count, 1);
-        assert_eq!(catalog.pools.len(), 2);
+        assert_eq!(catalog.accounts[0].id, "ready");
+        assert_eq!(catalog.accounts[0].state, "可用");
+        assert_eq!(catalog.accounts[0].latency.display_at(0), "测速失败");
+        assert_eq!(catalog.pools.len(), 1);
+        assert_eq!(catalog.pools[0].id, "p");
+        assert_eq!(catalog.pools[0].account_count, 1);
+        pools["data"][0]["accounts"][0]["available"] = json!(false);
+        let hidden = parse(&models, &pools).unwrap();
+        assert!(hidden.pools.is_empty());
+        assert!(hidden.accounts.is_empty());
+        assert!(hidden.models.is_empty());
+        pools["data"][0]["accounts"][0]["available"] = json!(true);
+        assert_eq!(parse(&models, &pools).unwrap().pools.len(), 1);
         assert!(parse(&json!({"data":[]}), &json!({"error":"bad"})).is_err());
     }
 }

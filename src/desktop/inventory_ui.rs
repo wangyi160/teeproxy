@@ -736,7 +736,7 @@ mod tests {
                 let models = serde_json::json!({"data":[{"id":"chatgpt/alpha","router_provider":"openai","router_model":"alpha","router_pools":["pool-a"]},{"id":"chatgpt/beta","router_provider":"openai","router_model":"beta","router_pools":["pool-a","pool-b"]}]});
                 let mut pools = serde_json::json!({"data":[
                     {"id":"pool-a","accounts":[{"id":"account-a","enabled":true,"available":true},{"id":"account-b","enabled":false,"available":false}]},
-                    {"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":false}]},
+                    {"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":true}]},
                     {"id":"pool-empty","accounts":[]}
                 ]});
                 let probe = serde_json::json!({"status":"measured","latency_ms":170.25,
@@ -754,11 +754,10 @@ mod tests {
                 assert_eq!(saved_policy.max_multiplier_millionths, 250000);
                 assert_eq!(state.model_pool().unwrap().id, "pool-b");
                 assert_eq!(state.account_pool().unwrap().id, "pool-b");
-                assert_eq!(SendMessageW(state.by_id[&POOLS], LVM_GETITEMCOUNT, 0, 0), 3);
+                assert_eq!(SendMessageW(state.by_id[&POOLS], LVM_GETITEMCOUNT, 0, 0), 2);
                 assert_eq!(cell_text(state.by_id[&POOLS], 0, 4), "170.2 ms");
-                assert_eq!(cell_text(state.by_id[&POOLS], 0, 3), "2");
+                assert_eq!(cell_text(state.by_id[&POOLS], 0, 3), "1");
                 assert_eq!(cell_text(state.by_id[&POOLS], 1, 3), "1");
-                assert_eq!(cell_text(state.by_id[&POOLS], 2, 3), "0");
                 state.dpi = 144;
                 state.refresh_fonts();
                 assert_eq!(
@@ -784,7 +783,7 @@ mod tests {
                     1
                 );
                 assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 0), "account-b");
-                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 1), "暂不可用");
+                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 1), "可用");
                 state.set(SEARCH, "BETA");
                 state.render_catalog();
                 assert_eq!(
@@ -893,11 +892,10 @@ mod tests {
                 assert_eq!(state.account_pool().unwrap().id, "pool-a");
                 assert_eq!(
                     SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
-                    2
+                    1
                 );
                 assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 0), "account-a");
                 assert_eq!(cell_text(state.by_id[&ACCOUNTS], 0, 2), "170.2 ms");
-                assert_eq!(cell_text(state.by_id[&ACCOUNTS], 1, 1), "已停用");
                 assert_eq!(state.model_pool().unwrap().id, "pool-a");
                 assert_eq!(state.model_rows.len(), 2);
                 assert!(state.text(SEARCH).is_empty());
@@ -916,14 +914,14 @@ mod tests {
                 pools["data"][1]["pool_name"] = serde_json::json!("first");
                 state.replace_catalog(catalog::parse(&models, &pools).unwrap());
                 assert_eq!(state.account_pool().unwrap().id, "pool-a");
-                assert_eq!(selected(state.by_id[&POOLS]), Some(2));
+                assert_eq!(selected(state.by_id[&POOLS]), Some(1));
                 let selected_route =
                     SendMessageW(state.by_id[&ROUTE_POOL], CB_GETCURSEL, 0, 0) as usize;
                 assert_eq!(state.catalog.pools[selected_route].id, "pool-a");
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 assert_eq!(
                     SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
-                    2
+                    1
                 );
                 state.select_page(INVENTORY_PAGE);
                 for id in [POOLS, ACCOUNTS, MODELS] {
@@ -940,7 +938,7 @@ mod tests {
                 state.replace_catalog(
                     catalog::parse(
                         &serde_json::json!({"data":[{"id":"chatgpt/beta","router_provider":"openai","router_model":"beta","router_pools":["pool-b"]}]}),
-                        &serde_json::json!({"data":[{"id":"pool-b","accounts":[]}]}),
+                        &serde_json::json!({"data":[{"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":true}]}]}),
                     )
                     .unwrap(),
                 );
@@ -960,12 +958,23 @@ mod tests {
                 );
                 let mut state = app.borrow_mut();
                 assert_eq!(state.account_pool().unwrap().id, "pool-b");
-                assert_eq!(state.account_pool().unwrap().account_count, 0);
+                assert_eq!(state.account_pool().unwrap().account_count, 1);
                 assert_eq!(
                     SendMessageW(state.by_id[&ACCOUNTS], LVM_GETITEMCOUNT, 0, 0),
-                    0
+                    1
                 );
-                assert_eq!(state.text(ACCOUNTS_EMPTY), "此账号池暂无账号");
+                let usable = mem::take(&mut state.catalog);
+                // Expiry removes the selected pool and its account/model panes,
+                // without silently changing the persisted fixed-pool rule.
+                state.replace_catalog(catalog::parse(
+                    &models,
+                    &serde_json::json!({"data":[{"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":false}]}]}),
+                ).unwrap());
+                assert!(state.account_pool().is_none());
+                assert!(state.model_rows.is_empty());
+                assert!(state.catalog.accounts.is_empty());
+                assert_eq!(state.configured_pool, "pool-a");
+                state.replace_catalog(usable);
                 let stale_catalog = mem::take(&mut state.catalog);
                 state.invalidate_catalog();
                 state.inventory_generation = 10;
