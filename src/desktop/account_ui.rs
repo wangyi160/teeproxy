@@ -504,11 +504,12 @@ impl App {
         if self.account.task.is_some() && !matches!(id,COPY|COPY_AMOUNT) {return Ok(());}
         if matches!(id,SUBMIT|SWITCH) {
             let base=account_client::platform(&self.text(PLATFORM))?;
-            let registering=id==SWITCH;
+            let mut registering=id==SWITCH;
             let key_id=if registering {identity::create(self.path.parent().unwrap(),&base)?} else {
                 let index=SendMessageW(USERNAME.hwnd(self),CB_GETCURSEL,0,0);
                 self.account.local_ids.get(index as usize).cloned().context("请选择本地 ID，或注册新 ID")?
             };
+            registering=registering||identity::is_pending(self.path.parent().unwrap(),&base,&key_id)?;
             self.disconnect_identity()?;self.account.clear();
             self.account.key_id=key_id;self.account.base=base.clone();
             self.account.client=Some(Arc::new(AccountClient::new(&base)?));
@@ -911,6 +912,7 @@ impl App {
             Action::Login | Action::Register => {
                 self.accept_router_access(&value["router_access"]);
                 self.account.me = value;
+                if let Err(error)=identity::pending_registration(self.path.parent().unwrap(),&self.account.base,&self.account.key_id,false){self.set(FEEDBACK,&error.to_string());}
                 self.account.bind_retry = true;
                 self.account.refresh_pending =
                     is_account_page(self.page) && self.page != ACCOUNT_PAGE;
@@ -1146,10 +1148,11 @@ impl App {
         let base = account_client::platform(saved["platform"].as_str().context("平台地址无效")?)?;
         self.account.key_id=identity::migrate(self.path.parent().unwrap(),&saved)?;
         self.account.base=base.clone();self.set(PLATFORM,&base);
-        self.account.client=Some(Arc::new(AccountClient::new(&base)?));
+        let legacy=saved["public_key"].is_null();
+        self.account.client=Some(Arc::new(if legacy {AccountClient::restore(&base,&saved["session"])?}else{AccountClient::new(&base)?}));
         self.set(ROUTER,saved["router_url"].as_str().unwrap_or(""));
         self.account.connection_ready=false;self.refresh_local_identities()?;self.render_account();
-        self.submit_account(Action::Login,"POST","login".into(),json!({}),(0,String::new()),String::new())
+        self.submit_account(Action::Login,"POST",if legacy {"bind"}else{"login"}.into(),json!({}),(0,String::new()),String::new())
     }
     unsafe fn accept_router_access(&mut self, value: &Value) {
         if let Some(token) = value["token"].as_str().filter(|s| !s.is_empty() && s.len() <= 2048) {

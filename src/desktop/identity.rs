@@ -11,7 +11,22 @@ use zeroize::Zeroizing;
 pub(super) fn create(directory: &Path, platform: &str) -> Result<String> {
     let mut seed=Zeroizing::new(vec![0;32]);
     getrandom::getrandom(&mut seed).map_err(|_|anyhow::anyhow!("无法生成身份"))?;
-    store_key(directory,platform,&seed)
+    let id=store_key(directory,platform,&seed)?;
+    pending_registration(directory,platform,&id,true)?;
+    Ok(id)
+}
+pub(super) fn pending_registration(directory:&Path,platform:&str,id:&str,pending:bool)->Result<()> {
+    key(directory,platform,id)?;
+    let path=directory.join("identities").join(format!("{id}.dpapi"));
+    let bytes=settings::crypt(&std::fs::read(&path)?,false)?;
+    let mut value:Value=serde_json::from_slice(&bytes)?;
+    value["registration_pending"]=Value::Bool(pending);
+    write(&path,&settings::crypt(&Zeroizing::new(serde_json::to_vec(&value)?),true)?)
+}
+pub(super) fn is_pending(directory:&Path,platform:&str,id:&str)->Result<bool>{
+    key(directory,platform,id)?;
+    let bytes=settings::crypt(&std::fs::read(directory.join("identities").join(format!("{id}.dpapi")))?,false)?;
+    Ok(serde_json::from_slice::<Value>(&bytes)?["registration_pending"]==true)
 }
 fn store_key(directory: &Path, platform: &str, seed: &[u8]) -> Result<String> {
     let signer=crate::user_auth::Signer::from_seed(seed)?;
@@ -48,10 +63,12 @@ pub(super) fn migrate(directory:&Path,saved:&Value)->Result<String>{
     use sha2::{Digest,Sha256};
     let account=saved["account"]["id"].as_str().ok_or_else(||anyhow::anyhow!("账户信息无效"))?;
     let name=crate::request_proof::hex(&Sha256::digest(serde_json::to_vec(&(platform,account))?));
-    // Never generate a replacement for a missing existing key.
+    // Password-era sessions may enroll their first key. Existing signing identities
+    // must restore the original key; a lost signer is never replaced silently.
+    if saved["public_key"].is_null(){signer(directory,platform,account)?;}
     let seed=settings::crypt(&std::fs::read(directory.join(format!("user-signing-{name}.dpapi")))?,false)?;
     let signer=crate::user_auth::Signer::from_seed(&seed)?;
-    ensure!(saved["public_key"]==signer.public_key(),"请恢复原身份密钥文件");
+    ensure!(saved["public_key"].is_null()||saved["public_key"]==signer.public_key(),"请恢复原身份密钥文件");
     store_key(directory,platform,&seed)
 }
 

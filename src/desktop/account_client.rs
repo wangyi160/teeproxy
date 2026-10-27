@@ -106,10 +106,7 @@ impl AccountClient {
     pub async fn identity_login(&self, signer: &crate::user_auth::Signer, purpose: &str) -> std::result::Result<Value,Failure> {
         let value=self.request("POST","identity/challenge",json!({"role":"user","public_key":signer.public_key(),"purpose":purpose}),"").await?;
         let proof=signer.identity_proof(&value["challenge"],&self.base,purpose).map_err(|_|Failure{status:401,message:"身份验证挑战无效".into()})?;
-        let response=self.request("POST",purpose,proof,"").await;
-        if purpose=="login" && response.as_ref().is_err_and(|e|e.status==404) {
-            return Box::pin(self.identity_login(signer,"register")).await;
-        }
+        let response=self.request("POST",if purpose=="bind"{"identity/bind"}else{purpose},proof,"").await;
         let value=response?;
         if value["account"]["identity_id"]!=signer.user_id() || value["account"]["public_key"]!=signer.public_key() {
             *self.session.lock().await=Session::default();
@@ -117,7 +114,6 @@ impl AccountClient {
         }
         Ok(value)
     }
-    #[cfg(test)]
     pub fn restore(base: &str, value: &Value) -> Result<Self> {
         let mut client = Self::new(base)?;
         let cookie = value["cookie"].as_str().unwrap_or("");
@@ -175,8 +171,8 @@ impl AccountClient {
             });
         }
         let mut session = self.session.lock().await;
-        let authenticating = route == "login" || route == "register";
-        if authenticating {
+        let authenticating = route == "login" || route == "register" || route=="identity/bind";
+        if authenticating && route!="identity/bind" {
             *session = Session::default();
         }
         let mut request = self.http.request(
