@@ -84,6 +84,8 @@ pub struct VerifiedSession {
     transport: Transport,
     verified_at: Instant,
     routing_v1: bool,
+    boot_id: String,
+    router_access: std::sync::Arc<std::sync::RwLock<zeroize::Zeroizing<String>>>,
 }
 
 /// Only transport failures may request a fresh attestation. A POST whose send
@@ -119,11 +121,15 @@ impl VerifiedSession {
         if self.routing_v1 {
             return Ok(());
         }
+        let access = self.router_access.read().unwrap().clone();
         let response = self
-            .send_request(
+            .send_verified(
                 Request::builder()
                     .uri("/health/live")
+                    .header("x-router-access", access.as_str())
                     .body(Full::new(Bytes::new()))?,
+                8192,
+                Duration::from_secs(90),
             )
             .await?;
         ensure!(
@@ -144,6 +150,8 @@ impl VerifiedSession {
                 .is_some_and(|vs| vs.iter().any(|v| v.as_u64() == Some(1))),
             "Router routing v1 required"
         );
+        ensure!(value["user_auth_version"] == 1, "Router user request signatures v1 required");
+        self.boot_id = value["boot_id"].as_str().filter(|s| !s.is_empty() && s.len()<=128).ok_or_else(||anyhow::anyhow!("Router boot identity missing"))?.to_owned();
         self.routing_v1 = true;
         Ok(())
     }
@@ -158,9 +166,10 @@ impl VerifiedSession {
         method: &str,
         path: &str,
         api_key: &str,
+        signer: &crate::user_auth::Signer,
         body: String,
     ) -> Result<Response<Incoming>> {
-        self.send_in_pool(method, path, api_key, body, None).await
+        self.send_in_pool(method, path, api_key, signer, body, None).await
     }
 
     pub async fn send_in_pool(
@@ -168,10 +177,13 @@ impl VerifiedSession {
         method: &str,
         path: &str,
         api_key: &str,
+        signer: &crate::user_auth::Signer,
         body: String,
         pool: Option<&str>,
     ) -> Result<Response<Incoming>> {
-        ensure!(allowed_api(method, path), "此 SDK 不开放该接口");
+        let uri: hyper::Uri = path.parse()?;
+        ensure!(uri.scheme().is_none() && uri.authority().is_none()
+            && allowed_api(method, uri.path()) && !router_query(method, uri.path()), "此 SDK 不开放该接口");
         ensure!(body.len() <= MAX_BODY, "请求体过大");
         let mut request = Request::builder()
             .method(method)
@@ -194,58 +206,41 @@ impl VerifiedSession {
             request = request.header("x-router-pool", pool);
         }
         let request = request.body(Full::new(Bytes::from(body)))?;
-        self.send_request(request).await
+        self.send_request(request, signer).await
     }
 
     /// Send unmodified bytes and caller headers on this exact attested channel.
     pub async fn send_request(
         &mut self,
         request: Request<Full<Bytes>>,
+        signer: &crate::user_auth::Signer,
     ) -> Result<Response<Incoming>> {
         let seconds = if request.method() == hyper::Method::POST {
             crate::config::response_header_seconds()
         } else {
             90
         };
-        self.send_request_with_timeout(request, Duration::from_secs(seconds))
+        self.send_request_with_timeout(request, signer, Duration::from_secs(seconds))
             .await
     }
 
     pub(crate) async fn send_request_with_timeout(
         &mut self,
         request: Request<Full<Bytes>>,
+        signer: &crate::user_auth::Signer,
         response_timeout: Duration,
     ) -> Result<Response<Incoming>> {
         ensure!(
-            allowed_api(request.method().as_str(), request.uri().path()),
+            allowed_api(request.method().as_str(), request.uri().path())
+                && !router_query(request.method().as_str(), request.uri().path()),
             "Unsupported router API"
         );
+        self.require_routing_v1().await?;
+        let (mut parts, body) = request.into_parts();
+        let bytes = body.collect().await?.to_bytes();
+        signer.sign(&self.boot_id, &parts.method, &parts.uri, &mut parts.headers, &bytes)?;
+        let request = Request::from_parts(parts, Full::new(bytes));
         self.send_verified(request, MAX_BODY, response_timeout)
-            .await
-    }
-
-    /// Private merchant transport only; the public loopback gateway never calls this.
-    pub async fn send_merchant(
-        &mut self,
-        method: &str,
-        path: &str,
-        token: &str,
-        body: Vec<u8>,
-    ) -> Result<Response<Incoming>> {
-        let uri: hyper::Uri = path.parse()?;
-        ensure!(
-            uri.scheme().is_none()
-                && uri.authority().is_none()
-                && crate::merchant_transport::allowed(method, uri.path()),
-            "Unsupported merchant API"
-        );
-        let request = Request::builder()
-            .method(method)
-            .uri(uri)
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
-            .body(Full::new(Bytes::from(body)))?;
-        self.send_verified(request, 16 * 1024 * 1024, Duration::from_secs(90))
             .await
     }
 
@@ -326,6 +321,7 @@ pub struct VerificationAttempt {
 
 #[derive(Default)]
 pub struct Trust {
+    pub router_access: std::sync::Arc<std::sync::RwLock<zeroize::Zeroizing<String>>>,
     #[cfg(test)]
     pub(crate) allow_test_evidence: bool,
     #[cfg(feature = "tdx-verifier")]
@@ -416,11 +412,14 @@ pub async fn verify(endpoint: &str, trust: &Trust) -> VerificationAttempt {
             driver,
             authority,
         };
+        let access = trust.router_access.read().unwrap().clone();
+        ensure!(cfg!(test) || !access.is_empty(), "Router access credential missing; sign in again");
         let nonce = random_hex()?;
         report.nonce = Some(nonce.clone());
         let request = Request::builder()
             .method("POST")
             .uri(ATTESTATION_PATH)
+            .header("x-router-access", access.as_str())
             .header("host", &transport.authority)
             .header("content-type", "application/json")
             .body(Full::new(Bytes::from(serde_json::to_vec(&Challenge {
@@ -492,6 +491,8 @@ pub async fn verify(endpoint: &str, trust: &Trust) -> VerificationAttempt {
             transport,
             verified_at: Instant::now(),
             routing_v1: false,
+            boot_id: String::new(),
+            router_access: trust.router_access.clone(),
         })
     }
     .await;
@@ -547,7 +548,9 @@ mod reconnect_tests {
             VerifiedSession {
                 id: "test-session".into(),
                 verified_at: Instant::now(),
-                routing_v1: false,
+                routing_v1: true,
+            boot_id: "fixture-boot".into(),
+            router_access: Default::default(),
                 transport: Transport {
                     sender,
                     driver,
@@ -563,7 +566,7 @@ mod reconnect_tests {
         let (mut session, mut peer) = transport_fixture().await;
         let request = tokio::spawn(async move {
             let response = session
-                .send("POST", "/v1/chat/completions", "test-only-key", "{}".into())
+                .send("POST", "/v1/chat/completions", "test-only-key", &crate::user_auth::fixture(), "{}".into())
                 .await;
             (session, response)
         });
@@ -610,7 +613,7 @@ mod reconnect_tests {
                 .unwrap();
             }
             let error = session
-                .send("POST", "/v1/chat/completions", "never-send", "{}".into())
+                .send("POST", "/v1/chat/completions", "never-send", &crate::user_auth::fixture(), "{}".into())
                 .await
                 .unwrap_err();
             assert!(
@@ -630,7 +633,7 @@ mod reconnect_tests {
     #[tokio::test]
     async fn lost_response_is_retryable_for_get_but_not_post() {
         for (method, path, retry_safe) in [
-            ("GET", "/v1/pools", true),
+            ("GET", "/health/live", true),
             ("POST", "/v1/chat/completions", false),
         ] {
             let (mut session, mut peer) = transport_fixture().await;
@@ -650,10 +653,14 @@ mod reconnect_tests {
                 drop(peer);
                 request
             });
-            let error = session
-                .send(method, path, "test-only-key", "{}".into())
-                .await
-                .unwrap_err();
+            let result = if method == "GET" {
+                // GET transport is now internal capability negotiation only.
+                session.routing_v1 = false;
+                session.require_routing_v1().await
+            } else {
+                session.send(method, path, "test-only-key", &crate::user_auth::fixture(), "{}".into()).await.map(|_| ())
+            };
+            let error = result.unwrap_err();
             assert_eq!(
                 error
                     .downcast_ref::<ConnectionFailure>()

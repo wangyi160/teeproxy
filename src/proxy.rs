@@ -1,7 +1,7 @@
 use crate::{
     client::{Trust, VerifiedSession, verify},
     config::Config,
-    protocol::{MAX_BODY, allowed_api},
+    protocol::{MAX_BODY, allowed_api, known_api_path, router_query},
 };
 use anyhow::{Result, ensure};
 use bytes::Bytes;
@@ -89,6 +89,11 @@ impl Body for ForwardBody {
                 this.idle
                     .as_mut()
                     .reset(tokio::time::Instant::now() + this.idle_duration);
+                // Trailers must obey the same Agent boundary as response headers.
+                let frame = match frame.into_trailers() {
+                    Ok(headers) => Frame::trailers(clean_headers(&headers, false)),
+                    Err(frame) => frame,
+                };
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(_))) => {
@@ -115,7 +120,8 @@ pub struct Proxy {
     requests: Arc<Semaphore>,
     connections: Arc<Semaphore>,
     router_auth: HeaderValue,
-    client_key: Option<zeroize::Zeroizing<String>>,
+    catalog: tokio::sync::watch::Sender<Arc<crate::catalog::Cache>>,
+    client_key: zeroize::Zeroizing<String>,
     routing: Arc<crate::routing::State>,
     rules: Mutex<crate::routing::Rules>,
 }
@@ -128,6 +134,7 @@ impl Proxy {
         client_key: Option<&str>,
     ) -> Result<Arc<Self>> {
         config.validate()?;
+        ensure!(config.user_signer.is_some(), "Local user signing identity is required");
         ensure!(
             !router_key.is_empty() && router_key.len() <= 8192,
             "Invalid router key"
@@ -136,17 +143,13 @@ impl Proxy {
             .parse()
             .map_err(|_| anyhow::anyhow!("Invalid router key"))?;
         router_auth.set_sensitive(true);
+        let key = client_key.ok_or_else(|| anyhow::anyhow!("Agent API key is required"))?;
         ensure!(
-            config.client_key_env.is_some() == client_key.is_some(),
-            "Missing or unexpected local client key"
+            key.len() >= 16 && key.len() <= 256 && key.bytes().all(|c| c.is_ascii_graphic()),
+            "API key must contain 16 to 256 visible ASCII characters"
         );
-        if let Some(key) = client_key {
-            ensure!(
-                key.len() >= 16 && key.len() <= 256 && key.bytes().all(|c| c.is_ascii_graphic()),
-                "Client key must contain 16 to 256 visible ASCII characters"
-            );
-        }
         Ok(Arc::new(Self {
+            catalog: tokio::sync::watch::channel(crate::catalog::Cache::public(&config.management_url)?).0,
             requests: Arc::new(Semaphore::new(config.max_in_flight)),
             connections: Arc::new(Semaphore::new(config.max_connections)),
             pool: Arc::new(SessionPool {
@@ -155,7 +158,7 @@ impl Proxy {
                 idle: Mutex::new(Vec::new()),
             }),
             router_auth,
-            client_key: client_key.map(|key| zeroize::Zeroizing::new(key.to_owned())),
+            client_key: zeroize::Zeroizing::new(key.to_owned()),
             routing: Default::default(),
             rules: Mutex::new(crate::routing::Rules::new(
                 config.routing.clone(),
@@ -170,6 +173,9 @@ impl Proxy {
     }
     pub fn observe_routes(&self, observer: Arc<dyn Fn(String) + Send + Sync>) {
         self.routing.observe(observer);
+    }
+    pub fn use_catalog(&self, catalog: Arc<crate::catalog::Cache>) {
+        self.catalog.send_replace(catalog);
     }
 
     pub(crate) fn routing_rules(&self) -> crate::routing::Rules {
@@ -196,17 +202,24 @@ impl Proxy {
         );
         // Owning these tasks makes stopping the listener stop existing clients too.
         let mut clients = tokio::task::JoinSet::new();
+        let mut catalog = self.catalog.subscribe();
+        let mut access_revoked = false;
         tokio::pin!(shutdown);
         loop {
-            let (socket, peer) = tokio::select! {
+            let current_catalog = catalog.borrow_and_update().clone();
+            let mut revoked = current_catalog.revocation();
+            if current_catalog.is_revoked() {
+                access_revoked = true;
+                break;
+            }
+            let (socket, _) = tokio::select! {
                 biased;
                 _ = &mut shutdown => break,
+                _ = catalog.changed() => continue,
+                _ = revoked.changed() => continue,
                 _ = clients.join_next(), if !clients.is_empty() => continue,
                 accepted = listener.accept() => accepted?,
             };
-            if self.client_key.is_none() && !peer.ip().is_loopback() {
-                continue;
-            }
             // A wildcard listener has no concrete destination address. Validate
             // Host against the actual local address of this accepted socket.
             let address = socket.local_addr()?;
@@ -227,13 +240,12 @@ impl Proxy {
         }
         drop(listener);
         clients.shutdown().await;
+        if access_revoked { return Err(crate::catalog::AccessRevoked.into()); }
         Ok(())
     }
 
     fn authorized(&self, headers: &HeaderMap) -> bool {
-        let Some(expected) = &self.client_key else {
-            return true;
-        };
+        let expected = &self.client_key;
         let mut found = false;
         for name in ["authorization", "x-api-key", "x-goog-api-key"] {
             for value in headers.get_all(name) {
@@ -265,9 +277,6 @@ impl Proxy {
         request: Request<Incoming>,
         address: SocketAddr,
     ) -> Response<ProxyBody> {
-        if request.method() == Method::CONNECT {
-            return failure(405, "connect_not_supported_use_api_base_url");
-        }
         if !self.authorized(request.headers()) {
             let mut response = failure(401, "client_authentication_required");
             response.headers_mut().insert(
@@ -275,6 +284,9 @@ impl Proxy {
                 HeaderValue::from_static("Bearer realm=\"teeproxy\""),
             );
             return response;
+        }
+        if request.method() == Method::CONNECT {
+            return failure(405, "connect_not_supported_use_api_base_url");
         }
         if is_browser_request(request.headers()) {
             return failure(403, "browser_request_rejected");
@@ -286,11 +298,25 @@ impl Proxy {
             Ok(value) => value,
             Err(code) => return failure(code, "request_not_allowed"),
         };
+        if router_query(request.method().as_str(), uri.path()) {
+            let catalog = self.catalog.borrow().clone();
+            return match catalog.load(false).await {
+                Ok(value) => {
+                    let bytes = if request.method() == Method::HEAD { String::new() } else { agent_models(&value["models"]).to_string() };
+                    let mut response = Response::new(Full::new(Bytes::from(bytes)).map_err(|never| match never {}).boxed_unsync());
+                    response.headers_mut().insert("content-type", HeaderValue::from_static("application/json"));
+                    response.headers_mut().insert("cache-control", HeaderValue::from_static("no-store"));
+                    response
+                }
+                Err(error) if error.downcast_ref::<crate::catalog::AccessRevoked>().is_some() => failure(401,"platform_login_required"),
+                Err(_) => failure(503,"management_catalog_unavailable"),
+            };
+        }
         let Ok(permit) = self.requests.clone().try_acquire_owned() else {
             return failure(503, "proxy_busy");
         };
         // Snapshot before awaiting the body or TEE handshake. Live edits only
-        // affect later requests, never the validation of this one's response.
+        // affect later requests, never the rules already sent for this one.
         let rules = self.routing_rules();
         let (parts, body) = request.into_parts();
         let data = match timeout(
@@ -307,13 +333,10 @@ impl Proxy {
             Ok(data) => data,
             Err(code) => return failure(code, "invalid_content_encoding_or_body_limit"),
         };
-        let rule = if parts.method == Method::POST {
-            if !matches!(
-                uri.path(),
-                "/v1/chat/completions" | "/v1/responses" | "/v1/messages"
-            ) {
-                return failure(400, "routing_unsupported_protocol");
-            }
+        // Every public operation carries the configured policy, regardless of
+        // provider, HTTP method or body shape. Only Router's own read-only
+        // resources are exempt. Never infer generation/billing from POST.
+        let rule = if !router_query(parts.method.as_str(), uri.path()) {
             match rules.policy.header(rules.pool.as_deref()) {
                 Ok(rule) => Some(rule),
                 Err(_) => return failure(400, "routing_pool_required"),
@@ -327,10 +350,10 @@ impl Proxy {
             Ok(session) => session,
             Err(_) => return failure(502, "router_attestation_failed"),
         };
-        let generation = rule.is_some();
-        if generation && session.require_routing_v1().await.is_err() {
+        let routed = rule.is_some();
+        if routed && session.require_routing_v1().await.is_err() {
             self.routing
-                .notify("Router 不支持路由规则 v1，未发送生成请求".into());
+                .notify("Router 不支持路由规则 v1，未发送业务请求".into());
             return failure(502, "router_routing_protocol_required");
         }
         let mut request = Request::new(Full::new(data));
@@ -342,6 +365,7 @@ impl Proxy {
             .insert("authorization", self.router_auth.clone());
         for name in [
             "x-router-routing",
+            "x-router-access",
             "x-router-pool",
             "x-router-account",
             "x-router-price-version",
@@ -352,13 +376,13 @@ impl Proxy {
         if let Some(rule) = rule {
             request.headers_mut().insert("x-router-routing", rule);
         }
-        let response_timeout = Duration::from_secs(if generation {
+        let response_timeout = Duration::from_secs(if routed {
             self.config.response_header_timeout_secs
         } else {
             90
         });
         let response = match session
-            .send_request_with_timeout(request, response_timeout)
+            .send_request_with_timeout(request, self.config.user_signer.as_ref().unwrap(), response_timeout)
             .await
         {
             Ok(response) => response,
@@ -380,46 +404,23 @@ impl Proxy {
             }
         };
         let (parts, body) = response.into_parts();
-        let selected = if generation && parts.status.is_success() {
-            let pool = parts
-                .headers
-                .get("x-router-pool")
-                .and_then(|v| v.to_str().ok());
-            let rate = parts
-                .headers
-                .get("x-router-multiplier-millionths")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            match (pool, rate) {
-                (Some(pool), Some(rate))
-                    if parts
-                        .headers
-                        .get("x-router-routing-version")
-                        .is_some_and(|v| v == "1")
-                        && !pool.is_empty()
-                        && pool.len() <= 128
-                        && pool
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
-                        && rate <= rules.policy.max_multiplier_millionths
-                        && (rules.policy.automatic || rules.pool.as_deref() == Some(pool)) =>
-                {
-                    self.routing.notify(format!(
-                        "Router 已选择 {} · {}×",
-                        pool,
-                        crate::routing::format_multiplier(rate)
-                    ));
-                    Some((pool.to_owned(), rate))
-                }
-                _ => return failure(502, "router_routing_result_invalid"),
-            }
+        // Router enforces routing constraints before calling the provider.
+        // These optional headers are for display only: never reject or replay a response because of missing, unexpected or malformed metadata.
+        // Display routing details locally; do not expose them to the Agent.
+        if parts.status.is_success() {
+            (|| {
+                let pool = parts.headers.get("x-router-pool")?;
+                let name = pool.to_str().ok()?;
+                let rate = parts.headers.get("x-router-multiplier-millionths")?
+                    .to_str().ok()?.parse::<u64>().ok()?;
+                let formatted = crate::routing::format_multiplier(rate);
+                self.routing.notify(format!("Router 已选择 {name} · {formatted}×"));
+                Some(())
+            })();
         } else {
-            if generation {
-                self.routing
-                    .notify(format!("Router 拒绝请求：HTTP {}", parts.status.as_u16()));
-            }
-            None
-        };
+            self.routing
+                .notify(format!("Router 拒绝请求：HTTP {}", parts.status.as_u16()));
+        }
         let duration = Duration::from_secs(self.config.stream_idle_secs);
         let body = ForwardBody {
             inner: body,
@@ -435,19 +436,31 @@ impl Proxy {
         response
             .headers_mut()
             .insert("cache-control", HeaderValue::from_static("no-store"));
-        if let Some((pool, multiplier)) = selected {
-            response
-                .headers_mut()
-                .insert("x-teeproxy-pool", pool.parse().expect("validated pool"));
-            response.headers_mut().insert(
-                "x-teeproxy-multiplier",
-                crate::routing::format_multiplier(multiplier)
-                    .parse()
-                    .expect("formatted multiplier"),
-            );
-        }
         response
     }
+}
+
+/// Agent discovery exposes only standard model fields, never the UI inventory.
+fn agent_models(models: &serde_json::Value) -> serde_json::Value {
+    use serde_json::json;
+    let mut data = std::collections::BTreeMap::new();
+    for model in models["data"].as_array().into_iter().flatten() {
+        let Some(id) = model["id"].as_str().filter(|id| !id.is_empty()) else { continue; };
+        let provider = id.split_once('/').map(|(namespace, _)| namespace)
+            .or_else(|| model["router_provider"].as_str())
+            .or_else(|| model["owned_by"].as_str());
+        let owner = match provider {
+            Some("chatgpt" | "openai") => "openai",
+            Some("claude" | "anthropic") => "anthropic",
+            Some("grok" | "xai") => "xai",
+            Some("workbuddy") => "workbuddy",
+            _ => "unknown",
+        };
+        data.entry(id).or_insert_with(|| json!({
+            "id": id, "object": "model", "created": model["created"].as_u64().unwrap_or(0), "owned_by": owner
+        }));
+    }
+    json!({"object":"list", "data":data.into_values().collect::<Vec<_>>()})
 }
 
 fn http_server() -> hyper::server::conn::http1::Builder {
@@ -514,7 +527,7 @@ fn route_request(request: &Request<Incoming>, address: SocketAddr) -> Result<Uri
         return Err(400);
     }
     if !allowed_api(request.method().as_str(), uri.path()) {
-        return Err(404);
+        return Err(if known_api_path(uri.path()) { 405 } else { 404 });
     }
     if let Some(query) = uri.query() {
         let parsed =
@@ -575,6 +588,18 @@ fn clean_headers(headers: &HeaderMap, request: bool) -> HeaderMap {
             "sec-fetch-dest",
             "sec-fetch-user",
         ] {
+            result.remove(name);
+        }
+    } else {
+        // Keep native protocol / retry headers, strip internal routing and
+        // infrastructure details and any credentials or upstream cookies.
+        for name in headers.keys() {
+            if name.as_str().starts_with("x-router-") || name.as_str().starts_with("x-teeproxy-") {
+                result.remove(name);
+            }
+        }
+        for name in ["set-cookie", "set-cookie2", "cookie", "authorization", "x-api-key",
+            "x-goog-api-key", "server", "x-powered-by"] {
             result.remove(name);
         }
     }

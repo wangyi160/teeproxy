@@ -1,12 +1,11 @@
-//! Read-only client inventory on the exact attested TLS connection.
-use crate::{client, config::Config, protocol::MAX_BODY};
+//! Read-only inventory from the management platform snapshot.
 use anyhow::{Context, Result, ensure};
-use http_body_util::{BodyExt, Limited};
 use serde_json::Value;
-use std::{collections::BTreeSet, time::Duration};
+use std::collections::BTreeSet;
 
 #[derive(Default)]
 pub(crate) struct Catalog {
+    pub stale: bool,
     pub models: Vec<Model>,
     pub accounts: Vec<Account>,
     pub pools: Vec<Pool>,
@@ -101,41 +100,6 @@ pub(super) fn checked_time(seconds: u64) -> Option<String> {
         "{:02}-{:02} {:02}:{:02}:{:02}",
         local.wMonth, local.wDay, local.wHour, local.wMinute, local.wSecond
     ))
-}
-pub(crate) async fn fetch(config: &Config, key: &str) -> Result<Catalog> {
-    let trust = config.trust()?;
-    fetch_verified(&config.router, &trust, key).await
-}
-pub(crate) async fn fetch_verified(
-    router: &str,
-    trust: &client::Trust,
-    key: &str,
-) -> Result<Catalog> {
-    ensure!(!key.is_empty(), "请先登录账户并等待连接就绪");
-    tokio::time::timeout(Duration::from_secs(90), async {
-        let attempt = client::verify(router, trust).await;
-        let mut session = attempt
-            .session
-            .context("TEE 验证未通过，未发送 API key 或读取列表")?;
-        let mut values = Vec::new();
-        for path in ["/v1/models", "/v1/pools"] {
-            let response = session.send("GET", path, key, String::new()).await?;
-            ensure!(
-                response.status().is_success(),
-                "列表读取失败：{path} 返回 HTTP {}",
-                response.status()
-            );
-            let bytes = Limited::new(response.into_body(), MAX_BODY)
-                .collect()
-                .await
-                .map_err(|_| anyhow::anyhow!("目录响应过大或连接已中断"))?
-                .to_bytes();
-            values.push(serde_json::from_slice(&bytes).context("目录响应不是有效 JSON")?);
-        }
-        parse(&values[0], &values[1])
-    })
-    .await
-    .context("刷新列表超时")?
 }
 fn text(value: &Value) -> String {
     value

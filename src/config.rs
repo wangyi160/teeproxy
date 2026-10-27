@@ -10,7 +10,15 @@ use std::{
 pub struct Config {
     pub listen: SocketAddr,
     pub router: String,
+    #[serde(default = "management_url")]
+    pub management_url: String,
     pub router_key_env: String,
+    pub router_access_env: Option<String>,
+    pub user_signing_seed_env: Option<String>,
+    #[serde(skip)]
+    pub user_signer: Option<crate::user_auth::Signer>,
+    #[serde(skip)]
+    pub router_access: zeroize::Zeroizing<String>,
     pub tdx_policy: Option<PathBuf>,
     pub snp_policy: Option<PathBuf>,
     pub client_key_env: Option<String>,
@@ -30,6 +38,7 @@ pub struct Config {
 fn concurrency() -> usize {
     16
 }
+fn management_url() -> String { "https://teerouter.org".into() }
 fn connections() -> usize {
     128
 }
@@ -56,12 +65,8 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         crate::routing::Rules::new(self.routing.clone(), self.pool.clone())?;
         ensure!(
-            self.listen.ip().is_loopback()
-                || self
-                    .client_key_env
-                    .as_ref()
-                    .is_some_and(|name| !name.trim().is_empty()),
-            "A local client key is required when listening outside loopback"
+            self.client_key_env.as_ref().is_some_and(|name| !name.trim().is_empty()),
+            "client_key_env is required; Agent API key authentication cannot be disabled"
         );
         let url = reqwest::Url::parse(&self.router).context("Invalid router URL")?;
         ensure!(
@@ -90,6 +95,9 @@ impl Config {
 
     pub fn trust(&self) -> Result<crate::client::Trust> {
         let mut trust = crate::client::Trust::default();
+        *trust.router_access.write().unwrap() = if let Some(name) = &self.router_access_env {
+            zeroize::Zeroizing::new(std::env::var(name).context("Router access environment variable is unset")?)
+        } else { self.router_access.clone() };
         let mut releases = 0;
         if let Some(path) = &self.tdx_policy {
             #[cfg(feature = "tdx-verifier")]

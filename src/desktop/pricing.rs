@@ -1,9 +1,7 @@
-//! Official prices come from the router book, never from account inventories.
-use crate::{client, config::Config, protocol::MAX_BODY};
+//! The management platform serves cached billing prices for available models.
+use super::account_client::AccountClient;
 use anyhow::{Context, Result, ensure};
-use http_body_util::{BodyExt, Limited};
 use serde_json::Value;
-use std::time::Duration;
 
 #[derive(Default)]
 pub(super) struct Book {
@@ -21,34 +19,16 @@ pub(super) struct Row {
     pub details: String,
 }
 
-pub(super) async fn fetch(config: &Config, key: &str) -> Result<Book> {
-    let trust = config.trust()?;
-    tokio::time::timeout(Duration::from_secs(90), async {
-        let mut session = client::verify(&config.router, &trust)
-            .await
-            .session
-            .context("TEE 验证未通过，未读取价格簿")?;
-        let response = session
-            .send("GET", "/v1/pricing", key, String::new())
-            .await?;
-        ensure!(
-            response.status().as_u16() != 404,
-            "Router 尚不支持独立官方价格接口，请升级 Router"
-        );
-        ensure!(
-            response.status().is_success(),
-            "官方价格读取失败：HTTP {}",
-            response.status()
-        );
-        let bytes = Limited::new(response.into_body(), MAX_BODY)
-            .collect()
-            .await
-            .map_err(|_| anyhow::anyhow!("价格簿过大或连接已中断"))?
-            .to_bytes();
-        parse(&serde_json::from_slice(&bytes).context("价格簿不是有效 JSON")?)
-    })
-    .await
-    .context("读取官方价格超时")?
+pub(super) async fn fetch(client: &AccountClient) -> Result<Book> {
+    let value = client
+        .request("GET", "pricing", Value::Null, "")
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e.message))?;
+    ensure!(
+        value["scope"] == "available_models",
+        "管理平台尚未提供可用模型价格"
+    );
+    parse(&value)
 }
 
 fn text(value: &Value) -> Result<String> {
@@ -238,6 +218,32 @@ pub(super) mod tests {
             {"provider":"xai","version":1,"checked_at":1791936000,"source":"https://docs.x.ai/developers/pricing",
              "models":[{"model":"grok-test","rates":{"input":2000000,"output":6000000},
                 "billing_rules":{"long_context_inclusive":true},"long_context":{"above_input_tokens":200000,"rates":{"input":4000000,"output":12000000}}}]}]})
+    }
+    #[tokio::test]
+    async fn prices_load_from_platform_without_a_router_connection() {
+        use axum::{Json, Router, http::HeaderMap, routing::get};
+        let mock = Router::new().route(
+            "/portal/api/pricing",
+            get(|headers: HeaderMap| async move {
+                assert!(!headers.contains_key("authorization"));
+                let mut book = fixture();
+                book["scope"] = json!("available_models");
+                // The platform has already filtered models without a usable pool.
+                book["providers"][0]["models"] = json!([]);
+                Json(book)
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client =
+            AccountClient::test_client(format!("http://{}", listener.local_addr().unwrap()));
+        let server = tokio::spawn(async {
+            axum::serve(listener, mock).await.unwrap();
+        });
+        let book = fetch(&client).await.unwrap();
+        assert_eq!(book.models, 1);
+        assert_eq!(book.rows.len(), 2);
+        assert!(book.rows.iter().all(|r| r.model == "grok-test"));
+        server.abort();
     }
     #[test]
     fn complete_book_preserves_units_missing_prices_and_context_boundaries() {

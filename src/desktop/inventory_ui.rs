@@ -8,9 +8,8 @@ pub(super) const COPY_MODEL: u16 = 305;
 pub(super) const USE_POOL: u16 = 306;
 pub(super) const REFRESH: u16 = 307;
 pub(super) const CATALOG_STATUS: u16 = 308;
-pub(super) const POOL_DETAILS: u16 = 310;
 pub(super) const POOLS: u16 = 312;
-pub(super) const POOLS_EMPTY: u16 = 313;
+pub(super) const POOLS_LOADING: u16 = 313;
 pub(super) const ACCOUNTS_TITLE: u16 = 314;
 pub(super) const POOLS_TITLE: u16 = 315;
 pub(super) const MODELS_TITLE: u16 = 316;
@@ -19,22 +18,28 @@ pub(super) fn inventory_cards(width: i32, height: i32) -> [[i32; 4]; 3] {
     let left = (width - 296) * 44 / 100;
     [
         [244, 186, width - 280, 222],
-        [244, 456, left, height - 544],
-        [260 + left, 456, width - 296 - left, height - 544],
+        [244, 428, left, height - 516],
+        [260 + left, 428, width - 296 - left, height - 516],
     ]
 }
 
 pub(super) fn inventory_rect(id: u16, width: i32, height: i32) -> Option<[i32; 4]> {
-    let [_, accounts, models] = inventory_cards(width, height);
+    let [pools, accounts, models] = inventory_cards(width, height);
     let card = match id {
-        ACCOUNTS | ACCOUNTS_TITLE | ACCOUNTS_EMPTY => accounts,
-        MODELS | MODELS_TITLE | MODELS_EMPTY => models,
+        POOLS_LOADING => pools,
+        ACCOUNTS | ACCOUNTS_TITLE | ACCOUNTS_LOADING => accounts,
+        MODELS | MODELS_TITLE | MODELS_LOADING => models,
         _ => return None,
     };
     Some(match id {
-        ACCOUNTS_TITLE | MODELS_TITLE => [card[0] + 16, 470, card[2] - 32, 24],
-        ACCOUNTS_EMPTY | MODELS_EMPTY => [card[0] + 24, 556, card[2] - 48, 100],
-        _ => [card[0] + 16, 506, card[2] - 32, height - 610],
+        ACCOUNTS_TITLE | MODELS_TITLE => [card[0] + 16, card[1] + 14, card[2] - 32, 24],
+        POOLS_LOADING | ACCOUNTS_LOADING | MODELS_LOADING => [
+            card[0] + (card[2] - 48) / 2,
+            card[1] + 48 + (card[3] - 112) / 2,
+            48,
+            48,
+        ],
+        _ => [card[0] + 16, card[1] + 50, card[2] - 32, card[3] - 66],
     })
 }
 
@@ -79,27 +84,19 @@ impl App {
         self.edit(SEARCH, "", [416, 130, -820, 36], 0, "搜索所选池的模型")?;
         self.button(COPY_MODEL, "使用此池并复制模型", [-388, 130, 216, 36], 0)?;
         self.add(
-            POOL_DETAILS,
-            w!("STATIC"),
-            "请选择账号池",
-            SS_LEFT,
-            [244, 420, -280, 24],
-            2,
-        )?;
-        self.add(
             MODELS_TITLE,
             w!("STATIC"),
-            "模型 · 请先选择账号池",
+            "模型",
             SS_LEFT,
             [260, 470, 300, 24],
             4,
         )?;
         self.table(MODELS, &[("模型 ID", 282), ("接口", 124)])?;
         let empty = self.add(
-            MODELS_EMPTY,
+            MODELS_LOADING,
             w!("STATIC"),
-            "尚未加载模型\r\n\r\n请先完成连接设置，然后点击刷新列表。",
-            windows_sys::Win32::System::SystemServices::SS_CENTER,
+            "加载中",
+            windows_sys::Win32::System::SystemServices::SS_OWNERDRAW,
             [284, 332, -360, 100],
             0,
         )?;
@@ -136,7 +133,7 @@ impl App {
         self.add(
             ACCOUNTS_TITLE,
             w!("STATIC"),
-            "账号 · 请先选择账号池",
+            "账号",
             SS_LEFT,
             [260, 426, -312, 24],
             4,
@@ -153,10 +150,10 @@ impl App {
             ],
         )?;
         let empty = self.add(
-            POOLS_EMPTY,
+            POOLS_LOADING,
             w!("STATIC"),
-            "尚未加载账号池\r\n\r\n请完成连接设置，然后点击刷新列表。",
-            windows_sys::Win32::System::SystemServices::SS_CENTER,
+            "加载中",
+            windows_sys::Win32::System::SystemServices::SS_OWNERDRAW,
             [284, 280, -360, 80],
             0,
         )?;
@@ -170,10 +167,10 @@ impl App {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         );
         let empty = self.add(
-            ACCOUNTS_EMPTY,
+            ACCOUNTS_LOADING,
             w!("STATIC"),
-            "请选择上方的账号池\r\n\r\n此处只显示所选池中的账号。",
-            windows_sys::Win32::System::SystemServices::SS_CENTER,
+            "加载中",
+            windows_sys::Win32::System::SystemServices::SS_OWNERDRAW,
             [284, 518, -360, 80],
             0,
         )?;
@@ -298,7 +295,7 @@ impl App {
                     p.multiplier.clone(),
                     p.account_count.to_string(),
                     p.latency.display(),
-                    p.provider.clone(),
+                    self.pool_providers(p),
                     p.state.clone(),
                     p.latency.checked.clone(),
                 ]
@@ -328,14 +325,6 @@ impl App {
         self.set(
             POOLS_TITLE,
             &format!("账号池 · {} 个", self.catalog.pools.len()),
-        );
-        self.set(
-            POOLS_EMPTY,
-            if self.catalog_loaded {
-                "没有可见的账号池\r\n\r\n登录后显示当前账户可用的账号池。"
-            } else {
-                "尚未加载账号池\r\n\r\n请完成连接设置，然后点击刷新列表。"
-            },
         );
         self.render_accounts();
     }
@@ -370,15 +359,7 @@ impl App {
             &if let Some(pool) = self.account_pool() {
                 format!("账号 · {} 个", pool.account_count)
             } else {
-                "账号 · 请先选择账号池".into()
-            },
-        );
-        self.set(
-            ACCOUNTS_EMPTY,
-            if self.account_pool().is_some() {
-                "此账号池暂无账号"
-            } else {
-                "请选择上方的账号池\r\n\r\n此处只显示所选池中的账号。"
+                "账号".into()
             },
         );
     }
@@ -405,59 +386,21 @@ impl App {
             .collect::<Vec<_>>();
         fill(self.by_id[&MODELS], &models);
         self.set(
-            MODELS_EMPTY,
-            &if self.catalog_loaded {
-                if let Some(pool) = self.model_pool() {
-                    if filter.is_empty() {
-                        format!(
-                            "此账号池暂无可见模型\r\n\r\n{} · {}。请查看左侧账号状态。",
-                            pool.name, pool.state
-                        )
-                    } else {
-                        "此账号池没有匹配的模型\r\n\r\n清除搜索条件，或选择其他账号池。".into()
-                    }
-                } else {
-                    "请选择账号池\r\n\r\n原选择的池若已不可见，请手动选择其他池。".into()
-                }
-            } else {
-                "尚未加载模型\r\n\r\n请先完成连接设置，然后点击刷新列表。".into()
-            },
-        );
-        self.set(
             MODELS_TITLE,
             &format!("模型 · {} 个", self.model_rows.len()),
-        );
-        self.set(
-            POOL_DETAILS,
-            &if let Some(pool) = self.model_pool() {
-                format!(
-                    "{} · {} · {} · 倍率 {} · {} · {} / {} 个模型",
-                    pool.name,
-                    pool.merchant,
-                    self.pool_providers(pool),
-                    pool.multiplier,
-                    pool.state,
-                    self.model_rows.len(),
-                    self.catalog
-                        .models
-                        .iter()
-                        .filter(|m| m.pool == pool.id)
-                        .count()
-                )
-            } else {
-                "请选择账号池".into()
-            },
         );
         self.update_summary();
         self.update_visibility();
     }
     pub(super) unsafe fn invalidate_catalog(&mut self) {
+        self.management_catalog = None;
         self.catalog = Default::default();
         self.catalog_loaded = false;
         self.render_pools(None);
         self.refresh_route_pools();
         self.render_catalog();
-        self.set(CATALOG_STATUS, "配置已修改 · 请刷新列表");
+        self.inventory_refresh_pending = matches!(self.page, OVERVIEW | INVENTORY_PAGE);
+        self.set(CATALOG_STATUS, "");
     }
     unsafe fn select_inventory_pool(&mut self, pool: &str) -> Result<()> {
         ensure!(
@@ -490,26 +433,48 @@ impl App {
         self.select_inventory_pool(&pool)?;
         Ok(id)
     }
+    pub(super) unsafe fn refresh_inventory_if_due(&mut self) {
+        if !matches!(self.page, OVERVIEW | INVENTORY_PAGE)
+            || !self.account.logged_in()
+            || self.router_key.is_empty()
+            || self.inventory_task.is_some()
+            || self.stopping
+            || (self.task.is_some() && !self.running)
+            || (!self.inventory_refresh_pending
+                && self.inventory_refreshed.elapsed().as_secs() < 300)
+        {
+            return;
+        }
+        // Queue page entry behind another task or login, but do not spin on a failed fetch.
+        self.inventory_refresh_pending = false;
+        self.inventory_refreshed = std::time::Instant::now();
+        if let Err(error) = self.refresh_catalog() {
+            self.set(CATALOG_STATUS, "刷新失败");
+            self.action_failed(REFRESH, &error);
+        }
+    }
     pub(super) unsafe fn refresh_catalog(&mut self) -> Result<()> {
         if self.inventory_task.is_some() || self.stopping || (self.task.is_some() && !self.running)
         {
             return Ok(());
         }
-        let (profile, secrets) = self.snapshot()?;
-        let config = profile.config(&secrets, self.path.parent().unwrap())?;
-        ensure!(!secrets.router_key.is_empty(), "请先登录账户并等待连接就绪");
+        let cache = self.management_catalog()?;
         self.inventory_generation += 1;
+        self.inventory_refresh_pending = false;
         self.inventory_refreshed = std::time::Instant::now();
         self.inventory_finished_observed = false;
         let generation = self.inventory_generation;
         let sender = self.sender.clone();
         self.inventory_task = Some(self.runtime.spawn(async move {
-            let result = catalog::fetch(&config, &secrets.router_key)
-                .await
-                .map_err(|e| redact(&format!("{e:#}"), &secrets));
+            let result = async {
+                let value = cache.load(true).await?;
+                let mut catalog = catalog::parse(&value["models"], &value["pools"])?;
+                catalog.stale = value["status"] == "stale";
+                Ok(catalog)
+            }.await.map_err(|e: anyhow::Error| e.to_string());
             let _ = sender.send(Event::Inventory(generation, result));
         }));
-        self.set(CATALOG_STATUS, "正在验证并刷新列表…");
+        self.set(CATALOG_STATUS, "");
         self.busy(self.task.is_some());
         Ok(())
     }
@@ -697,10 +662,10 @@ mod tests {
                             pool: "pool-b".into(),
                             ..Profile::default()
                         },
-                        Secrets::default(),
+                        Secrets { client_key: "test-local-client-key".into(), router_key: String::new(), router_access: String::new() },
                     )))
                     .unwrap();
-                // The price page must work before any account or pool exists.
+                // Platform prices render without a local inventory or Router connection.
                 let initial_page = state.page;
                 state.price_book = pricing::parse(&pricing::tests::fixture()).unwrap();
                 state.prices_loaded = true;
@@ -806,13 +771,13 @@ mod tests {
                 assert_eq!(IsWindowEnabled(state.by_id[&ROUTE_PRIORITY]), 0);
                 assert_eq!(settings::load(&state.path).unwrap().0.pool, "pool-b");
                 let (profile, secrets) = state.snapshot().unwrap();
+                let mut config=profile.config(&secrets, state.path.parent().unwrap()).unwrap();
+                config.user_signer=Some(crate::user_auth::fixture());
                 let proxy = Proxy::new(
-                    profile
-                        .config(&secrets, state.path.parent().unwrap())
-                        .unwrap(),
+                    config,
                     client::Trust::default(),
                     "test-key",
-                    None,
+                    Some(&secrets.client_key),
                 )
                 .unwrap();
                 state.task = Some(state.runtime.spawn(std::future::pending::<()>()));
@@ -997,6 +962,26 @@ mod tests {
                     0
                 );
                 assert_eq!(SendMessageW(state.by_id[&POOLS], LVM_GETITEMCOUNT, 0, 0), 0);
+                // A denial discovered by the UI must stop the service and
+                // clear private rows, including while its window is hidden.
+                let denied = crate::catalog::Cache::new(|| Box::pin(async {
+                    Err(crate::catalog::AccessRevoked.into())
+                }));
+                state.management_catalog = Some(denied.clone());
+                let (shutdown, mut stopped) = tokio::sync::oneshot::channel();
+                state.shutdown = Some(shutdown);
+                state.task = Some(state.runtime.spawn(std::future::pending::<()>()));
+                state.running = true;
+                assert!(state.runtime.block_on(denied.load(true)).is_err());
+                state.poll();
+                assert_eq!(stopped.try_recv(), Ok(()));
+                assert!(state.stopping);
+                assert!(state.management_catalog.is_none());
+                assert!(state.catalog.models.is_empty());
+                assert!(!state.inventory_refresh_pending);
+                state.task.take().unwrap().abort();
+                state.running = false;
+                state.stopping = false;
                 state.tray.take();
                 DestroyWindow(hwnd);
                 for font in state.fonts {

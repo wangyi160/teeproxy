@@ -13,11 +13,11 @@ teeproxy gui [--settings PATH]  Windows native GUI with a separate profile
 
 teeproxy verify --config teeproxy.toml
 teeproxy run --config teeproxy.toml
-teeproxy merchant-transport --config teeproxy.toml
 
 Set your agent API base URL to http://127.0.0.1:8899/v1.
 The gateway verifies the router before sending data over upstream TLS.
 The router key is read only from the environment named by router_key_env.
+The login-issued handshake token is read from router_access_env.
 "
 );
 
@@ -83,15 +83,12 @@ async fn execute() -> Result<()> {
         "Expected a command and its --config argument; see --help"
     );
     ensure!(
-        matches!(args[0].as_str(), "run" | "verify" | "merchant-transport")
+        matches!(args[0].as_str(), "run" | "verify")
             && args[1] == "--config",
         "Unknown command; see --help"
     );
-    let config = Config::load(Path::new(&args[2]))?;
+    let mut config = Config::load(Path::new(&args[2]))?;
     let trust = config.trust()?;
-    if args[0] == "merchant-transport" {
-        return teeproxy::merchant_transport::run(&config.router, &trust).await;
-    }
     if args[0] == "verify" {
         let attempt = client::verify(&config.router, &trust).await;
         println!("{}", serde_json::to_string_pretty(&attempt.report)?);
@@ -111,6 +108,11 @@ async fn execute() -> Result<()> {
                 .map_err(|_| anyhow::anyhow!("Required client key environment variable is unset"))
         })
         .transpose()?;
+    let seed_name = config.user_signing_seed_env.as_ref().context("user_signing_seed_env is required")?;
+    let seed_hex = zeroize::Zeroizing::new(std::env::var(seed_name).context("Local signing seed is unset")?);
+    let seed: Vec<u8> = (0..seed_hex.len()).step_by(2).map(|i| seed_hex.get(i..i+2).and_then(|s|u8::from_str_radix(s,16).ok()).context("Invalid local signing seed")).collect::<Result<_>>()?;
+    let seed = zeroize::Zeroizing::new(seed);
+    config.user_signer = Some(teeproxy::user_auth::Signer::from_seed(&seed)?);
     let address = config.listen;
     let proxy = Proxy::new(config, trust, &key, client_key.as_ref().map(|v| v.as_str()))?;
     let listener = tokio::net::TcpListener::bind(address)

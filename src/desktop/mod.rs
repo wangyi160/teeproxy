@@ -7,6 +7,8 @@ pub(crate) mod catalog;
 mod identity;
 mod inventory_ui;
 mod layout_ui;
+mod loading_ui;
+mod overview_ui;
 mod pricing;
 mod pricing_ui;
 mod routing_ui;
@@ -14,6 +16,8 @@ pub mod settings;
 mod tray;
 use inventory_ui::*;
 use layout_ui::*;
+use loading_ui::*;
+use overview_ui::*;
 use pricing_ui::*;
 use routing_ui::*;
 
@@ -92,6 +96,7 @@ struct Control {
 struct App {
     account: account_ui::State,
     router_key: Zeroizing<String>,
+    router_access: std::sync::Arc<std::sync::RwLock<Zeroizing<String>>>,
     hwnd: HWND,
     controls: Vec<Control>,
     input_frames: Vec<([i32; 4], Option<usize>, HWND)>,
@@ -114,16 +119,19 @@ struct App {
     building_page: Option<usize>,
     page: usize,
     catalog: catalog::Catalog,
+    management_catalog: Option<std::sync::Arc<crate::catalog::Cache>>,
     catalog_loaded: bool,
     model_rows: Vec<usize>,
     price_book: pricing::Book,
     prices_loaded: bool,
     price_rows: Vec<usize>,
+    prices_refresh_pending: bool,
     configured_pool: String,
     account_pool_id: Option<String>,
     inventory_task: Option<JoinHandle<()>>,
     inventory_generation: u64,
     inventory_finished_observed: bool,
+    inventory_refresh_pending: bool,
     inventory_refreshed: std::time::Instant,
     latency_redrawn: std::time::Instant,
     tray: Option<tray::Tray>,
@@ -138,6 +146,7 @@ impl App {
         Ok(Self {
             account: account_ui::State::default(),
             router_key: Zeroizing::new(String::new()),
+            router_access: Default::default(),
             hwnd: ptr::null_mut(),
             controls: Vec::new(),
             input_frames: Vec::new(),
@@ -160,16 +169,19 @@ impl App {
             building_page: None,
             page: 2,
             catalog: Default::default(),
+            management_catalog: None,
             catalog_loaded: false,
             model_rows: Vec::new(),
             price_book: Default::default(),
             prices_loaded: false,
             price_rows: Vec::new(),
+            prices_refresh_pending: false,
             configured_pool: String::new(),
             account_pool_id: None,
             inventory_task: None,
             inventory_generation: 0,
             inventory_finished_observed: false,
+            inventory_refresh_pending: false,
             inventory_refreshed: std::time::Instant::now(),
             latency_redrawn: std::time::Instant::now(),
             tray: None,
@@ -481,7 +493,12 @@ impl App {
         let width = client.right * 96 / self.dpi as i32;
         let height = client.bottom * 96 / self.dpi as i32;
         for control in &self.controls {
-            let [x, y, w, h] = inventory_rect(control.id, width, height).unwrap_or(control.rect);
+            let [x, y, w, h] = self
+                .payment_rect(control.id, width, height)
+                .or_else(|| overview_rect(control.id, width))
+                .or_else(|| self.loading_rect(control.id, width, height))
+                .or_else(|| inventory_rect(control.id, width, height))
+                .unwrap_or(control.rect);
             MoveWindow(
                 control.hwnd,
                 self.scale(if x < 0 { width + x } else { x }),
@@ -491,6 +508,7 @@ impl App {
                 0,
             );
         }
+        self.payment_columns(width, height);
         RedrawWindow(
             self.hwnd,
             ptr::null(),
@@ -525,6 +543,7 @@ impl App {
             },
         );
         InvalidateRect(self.by_id[&STATUS], ptr::null(), 1);
+        self.update_overview();
     }
     unsafe fn append(&mut self, message: &str) {
         self.log
@@ -540,6 +559,7 @@ impl App {
     unsafe fn action_failed(&mut self, id: u16, error: &anyhow::Error) {
         let secrets = Secrets {
             router_key: self.router_key.to_string(),
+            router_access: self.router_access.read().unwrap().to_string(),
             client_key: self.text(CLIENT_KEY),
         };
         let action = if matches!(id, SAVE | SAVE_TRUST | ROUTE_SAVE) {
@@ -569,6 +589,7 @@ impl App {
         };
         let secrets = Secrets {
             router_key: self.router_key.to_string(),
+            router_access: self.router_access.read().unwrap().to_string(),
             client_key: self.text(CLIENT_KEY),
         };
         profile.config(&secrets, self.path.parent().unwrap())?;
@@ -617,6 +638,19 @@ impl App {
             },
         );
         InvalidateRect(self.by_id[&START], ptr::null(), 1);
+        self.set(
+            REFRESH,
+            if self.inventory_task.is_some() {
+                "加载中"
+            } else if self.page == PRICE_PAGE {
+                "刷新价格"
+            } else {
+                "刷新列表"
+            },
+        );
+        self.update_visibility();
+        self.update_overview();
+        InvalidateRect(self.by_id[&REFRESH], ptr::null(), 0);
     }
     unsafe fn action(&mut self, id: u16) -> Result<()> {
         if id == START && (self.task.is_some() || self.inventory_task.is_some()) {
@@ -624,7 +658,7 @@ impl App {
             return Ok(());
         }
         match id {
-            1511..=1548 => return self.account_action(id),
+            1511..=1553 => return self.account_action(id),
             NAV_FIRST..=NAV_LAST => {
                 self.select_page((id - NAV_FIRST) as usize);
                 if self.page == PRICE_PAGE && !self.prices_loaded && !self.router_key.is_empty() {
@@ -632,6 +666,11 @@ impl App {
                 }
             }
             OPEN_SETTINGS => self.select_page(SETTINGS_PAGE),
+            OPEN_ACCOUNT => self.select_page(ACCOUNT_PAGE),
+            OPEN_PAYMENTS => self.select_page(PAYMENTS_PAGE),
+            OPEN_ROUTING => self.select_page(ROUTE_PAGE),
+            OPEN_INVENTORY => self.select_page(INVENTORY_PAGE),
+            OPEN_LOG => self.select_page(LOG_PAGE),
             SAVE | SAVE_TRUST => {
                 let base = account_client::platform(&self.text(account_ui::PLATFORM))?;
                 let (profile, secrets) = self.snapshot()?;
@@ -660,13 +699,15 @@ impl App {
                     );
                 }
                 let (profile, secrets) = self.snapshot()?;
-                let config = profile.config(&secrets, self.path.parent().unwrap())?;
+                let mut config = profile.config(&secrets, self.path.parent().unwrap())?;
+                if id == START { config.user_signer = Some(self.user_signer()?); }
                 if id == START {
                     ensure!(
                         config.routing.automatic || config.pool.is_some(),
                         "请先在路由策略页选择账号池"
                     );
                 }
+                let management_catalog = if id == START { Some(self.management_catalog()?) } else { None };
                 self.generation += 1;
                 self.finished_observed = false;
                 let generation = self.generation;
@@ -682,9 +723,11 @@ impl App {
                     },
                     rgb(30, 94, 166),
                 );
+                let router_access = self.router_access.clone();
                 self.task = Some(self.runtime.spawn(async move {
                     let result: Result<()> = async {
-                        let trust = config.trust()?;
+                        let mut trust = config.trust()?;
+                        trust.router_access = router_access;
                         if id == VERIFY {
                             let attempt = tokio::select! {
                                 _ = shutdown_rx => { let _ = sender.send(Event::Stopped(generation)); return Ok(()); },
@@ -704,6 +747,7 @@ impl App {
                             let local_key = (!secrets.client_key.is_empty())
                                 .then_some(secrets.client_key.as_str());
                             let proxy = Proxy::new(config, trust, &secrets.router_key, local_key)?;
+                            if let Some(catalog) = management_catalog { proxy.use_catalog(catalog); }
                             let route_sender = sender.clone();
                             proxy.observe_routes(std::sync::Arc::new(move |message| { let _ = route_sender.send(Event::Route(generation, message)); }));
                             let listener = tokio::net::TcpListener::bind(address)
@@ -759,10 +803,13 @@ impl App {
         Ok(())
     }
     unsafe fn stop(&mut self) {
+        self.inventory_refresh_pending = false;
+        self.prices_refresh_pending = false;
         if let Some(task) = self.inventory_task.take() {
             task.abort();
             self.inventory_generation += 1;
-            self.set(CATALOG_STATUS, "刷新已取消 · 可重新刷新");
+            self.inventory_refreshed = std::time::Instant::now();
+            self.set(CATALOG_STATUS, "");
             self.set(PRICE_STATUS, "刷新已取消 · 可重新刷新");
             self.busy(self.task.is_some());
         }
@@ -792,21 +839,29 @@ impl App {
         }
     }
     unsafe fn poll(&mut self) {
+        if self.management_catalog.as_ref().is_some_and(|cache| cache.is_revoked()) {
+            self.stop();
+            self.invalidate_catalog();
+            self.invalidate_prices();
+            self.inventory_refresh_pending = false;
+            self.inventory_refreshed = std::time::Instant::now();
+            let message = crate::catalog::AccessRevoked.to_string();
+            self.account_error(&anyhow::Error::new(crate::catalog::AccessRevoked));
+            self.append(&message);
+        }
         while let Ok(event) = self.receiver.try_recv() {
             match event {
                 Event::Account(reply) => self.account_reply(reply),
                 Event::Prices(generation, result) if generation == self.inventory_generation => {
                     self.inventory_task.take();
+                    self.prices_refresh_pending = false;
                     match result {
                         Ok(book) => {
                             self.price_book = book;
                             self.prices_loaded = true;
                             self.render_prices();
-                            self.set(
-                                PRICE_STATUS,
-                                "官方价格已刷新 · 有报价不代表当前账号池可调用。",
-                            );
-                            self.append("已通过 TEE 验证读取完整官方价格簿。");
+                            self.set(PRICE_STATUS, "");
+                            self.append("已从管理平台更新可用模型价格。");
                         }
                         Err(error) => {
                             self.set(
@@ -824,31 +879,25 @@ impl App {
                 }
                 Event::Inventory(generation, result) if generation == self.inventory_generation => {
                     self.inventory_task.take();
+                    // The current request also satisfies page clicks made while it was running.
+                    self.inventory_refresh_pending = false;
                     match result {
                         Ok(catalog) => {
+                            let stale = catalog.stale;
                             self.replace_catalog(catalog);
-                            self.set(
-                                CATALOG_STATUS,
-                                &format!(
-                                    "{} 个池内模型 · {} 个账号池",
-                                    self.catalog.models.len(),
-                                    self.catalog.pools.len()
-                                ),
-                            );
-                            self.append("已通过 TEE 验证并刷新模型、账号池及账号状态。");
+                            self.set(CATALOG_STATUS, if stale { "缓存" } else { "" });
+                            self.append(if stale { "正在展示上次管理平台目录快照。" } else { "已从管理平台刷新模型、账号池及账号状态。" });
                         }
                         Err(error) => {
-                            self.set(CATALOG_STATUS, "刷新失败 · 请查看运行记录");
+                            // Offline reads return a marked cached result. An error
+                            // here must not leave a revoked account's old rows visible.
+                            self.replace_catalog(Default::default());
+                            self.catalog_loaded = false;
+                            self.set(CATALOG_STATUS, "刷新失败");
                             self.append(&error);
                         }
                     }
                     self.busy(self.task.is_some());
-                    if self.page == PRICE_PAGE
-                        && !self.prices_loaded
-                        && let Err(error) = self.refresh_prices()
-                    {
-                        self.append(&error.to_string());
-                    }
                 }
                 Event::Started(generation, url, proxy)
                     if generation == self.generation && !self.stopping =>
@@ -939,7 +988,7 @@ impl App {
         {
             if self.inventory_finished_observed {
                 self.inventory_task.take();
-                self.set(CATALOG_STATUS, "刷新意外结束 · 可重新刷新");
+                self.set(CATALOG_STATUS, "刷新失败");
                 self.set(PRICE_STATUS, "刷新意外结束 · 可重新刷新");
                 self.append("列表刷新任务未返回完成状态。");
                 self.busy(self.task.is_some());
@@ -947,21 +996,18 @@ impl App {
                 self.inventory_finished_observed = true;
             }
         }
-        if self.page == INVENTORY_PAGE && IsWindowVisible(self.hwnd) != 0 && self.catalog_loaded {
-            if self.latency_redrawn.elapsed().as_secs() >= 15 {
+        if matches!(self.page, OVERVIEW | INVENTORY_PAGE) && IsWindowVisible(self.hwnd) != 0 {
+            if self.page == INVENTORY_PAGE
+                && self.catalog_loaded
+                && self.latency_redrawn.elapsed().as_secs() >= 15
+            {
                 self.redraw_latencies();
                 self.latency_redrawn = std::time::Instant::now();
             }
-            if self.running
-                && !self.stopping
-                && self.inventory_task.is_none()
-                && self.inventory_refreshed.elapsed().as_secs() >= 300
-            {
-                self.inventory_refreshed = std::time::Instant::now();
-                if let Err(error) = self.refresh_catalog() {
-                    self.append(&error.to_string());
-                }
-            }
+            self.refresh_inventory_if_due();
+        }
+        if self.page == PRICE_PAGE && IsWindowVisible(self.hwnd) != 0 {
+            self.refresh_prices_if_due();
         }
     }
 }
@@ -1030,7 +1076,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                 return 0;
             }
             WM_DRAWITEM if lp != 0 => {
-                app.draw_button(&*(lp as *const DRAWITEMSTRUCT));
+                let item = &*(lp as *const DRAWITEMSTRUCT);
+                if matches!(
+                    item.CtlID as u16,
+                    POOLS_LOADING
+                        | ACCOUNTS_LOADING
+                        | MODELS_LOADING
+                        | PAGE_LOADING
+                        | ACCOUNT_LOADING
+                        | PRICE_LOADING
+                ) {
+                    app.draw_loading(item);
+                } else {
+                    app.draw_button(item);
+                }
                 return 1;
             }
             WM_NOTIFY if lp != 0 => {
@@ -1056,6 +1115,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
+                if id == 1512
+                    && (notification == EN_CHANGE as u16 || notification == EN_KILLFOCUS as u16)
+                {
+                    app.login_username_changed(notification == EN_KILLFOCUS as u16);
+                    return 0;
+                }
                 if (id == PRICE_SEARCH && notification == EN_CHANGE as u16)
                     || (id == PRICE_PROVIDER && notification == CBN_SELCHANGE as u16)
                 {
@@ -1112,7 +1177,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                         || matches!(id, tray::OPEN | tray::TOGGLE | tray::EXIT))
                     && let Err(error) = app.action(id)
                 {
-                    if (1511..=1548).contains(&id) {
+                    if (1511..=1553).contains(&id) {
                         app.account_error(&error);
                     } else {
                         app.action_failed(id, &error);
@@ -1123,6 +1188,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_TIMER => {
                 app.poll();
                 app.account_poll();
+                app.payment_tick();
+                app.loading_tick();
                 return 0;
             }
             WM_SIZE => {
@@ -1203,7 +1270,7 @@ fn rgb(r: u32, g: u32, b: u32) -> u32 {
 }
 fn redact(message: &str, secrets: &Secrets) -> String {
     let mut result = message.to_owned();
-    for secret in [&secrets.router_key, &secrets.client_key] {
+    for secret in [&secrets.router_key, &secrets.client_key, &secrets.router_access] {
         if !secret.is_empty() {
             result = result.replace(secret, "[API key]");
         }

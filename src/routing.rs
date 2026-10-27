@@ -70,7 +70,7 @@ impl Policy {
     }
 }
 
-/// One request owns one complete rule snapshot, including response validation.
+/// One request owns one complete rule snapshot to send to Router.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Rules {
     pub policy: Policy,

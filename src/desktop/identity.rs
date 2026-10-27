@@ -22,6 +22,19 @@ pub(super) fn device(directory: &Path) -> Result<String> {
     write(&path, id.as_bytes())?;
     Ok(id)
 }
+pub(super) fn signer(directory: &Path, platform: &str, account: &str) -> Result<crate::user_auth::Signer> {
+    use sha2::{Digest,Sha256};
+    ensure!(!account.is_empty(), "请先登录账户");
+    let name = crate::request_proof::hex(&Sha256::digest(serde_json::to_vec(&(platform,account))?));
+    let path = directory.join(format!("user-signing-{name}.dpapi"));
+    let seed = if path.exists() { settings::crypt(&std::fs::read(&path)?,false)? } else {
+        let mut seed=Zeroizing::new(vec![0u8;32]);
+        getrandom::getrandom(&mut seed).map_err(|_|anyhow::anyhow!("无法生成本地签名凭据"))?;
+        write(&path,&settings::crypt(&seed,true)?)?;
+        seed
+    };
+    crate::user_auth::Signer::from_seed(&seed)
+}
 pub(super) fn load(directory: &Path) -> Result<Option<Value>> {
     let path = directory.join("identity.dpapi");
     if !path.exists() {
@@ -45,6 +58,68 @@ pub(super) fn clear(directory: &Path) -> Result<()> {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+pub(super) fn login_password(
+    directory: &Path,
+    platform: &str,
+    username: &str,
+) -> Result<Option<(String, Zeroizing<String>)>> {
+    let path = directory.join("login-passwords.dpapi");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    ensure!(bytes.len() < 128 * 1024, "登录信息过大");
+    let plaintext = settings::crypt(&bytes, false)?;
+    let value: Value = serde_json::from_slice(&plaintext)?;
+    let result = value["accounts"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter().rev().find(|r| {
+                r["platform"] == platform
+                    && (username.is_empty() || r["username"] == username.to_lowercase())
+            })
+        })
+        .and_then(|r| {
+            Some((
+                r["username"].as_str()?.to_owned(),
+                Zeroizing::new(r["password"].as_str()?.to_owned()),
+            ))
+        });
+    Ok(result)
+}
+
+pub(super) fn remember_password(
+    directory: &Path,
+    platform: &str,
+    username: &str,
+    password: &str,
+) -> Result<()> {
+    ensure!(
+        !username.is_empty() && !password.is_empty() && password.len() <= 2048,
+        "登录信息无效"
+    );
+    let path = directory.join("login-passwords.dpapi");
+    let mut rows: Vec<Value> = if path.exists() {
+        let bytes = std::fs::read(&path)?;
+        ensure!(bytes.len() < 128 * 1024, "登录信息过大");
+        let plaintext = settings::crypt(&bytes, false)?;
+        serde_json::from_slice::<Value>(&plaintext)?["accounts"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let username = username.to_lowercase();
+    rows.retain(|r| !(r["platform"] == platform && r["username"] == username));
+    rows.push(serde_json::json!({"platform":platform,"username":username,"password":password}));
+    if rows.len() > 64 {
+        rows.drain(..rows.len() - 64);
+    }
+    let plaintext = Zeroizing::new(serde_json::to_vec(&serde_json::json!({"accounts":rows}))?);
+    write(&path, &settings::crypt(&plaintext, true)?)
 }
 fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     std::fs::create_dir_all(path.parent().unwrap())?;
@@ -80,6 +155,77 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_signer_is_account_scoped_and_survives_logout() {
+        let root=std::env::temp_dir().join(format!("teeproxy-signing-{}",account_client::operation_id().unwrap()));
+        let a=signer(&root,"https://platform.example","alice").unwrap();
+        clear(&root).unwrap();
+        assert_eq!(signer(&root,"https://platform.example","alice").unwrap().public_key(),a.public_key());
+        assert_ne!(signer(&root,"https://platform.example","bob").unwrap().public_key(),a.public_key());
+        assert_ne!(signer(&root,"https://other.example","alice").unwrap().public_key(),a.public_key());
+        let body=a.enrollment("alice","a1");
+        assert_eq!(body.as_object().unwrap().len(),3);
+        assert!(body.get("private_key").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn passwords_are_encrypted_scoped_and_survive_session_logout() {
+        let root = std::env::temp_dir().join(format!(
+            "teeproxy-passwords-{}",
+            account_client::operation_id().unwrap()
+        ));
+        remember_password(&root, "https://platform.example", "Alice", "private-alice").unwrap();
+        remember_password(&root, "https://platform.example", "Bob", "private-bob").unwrap();
+        assert_eq!(
+            login_password(&root, "https://platform.example", "alice")
+                .unwrap()
+                .unwrap()
+                .1
+                .as_str(),
+            "private-alice"
+        );
+        assert_eq!(
+            login_password(&root, "https://platform.example", "")
+                .unwrap()
+                .unwrap()
+                .0,
+            "bob"
+        );
+        assert!(
+            login_password(&root, "https://other.example", "alice")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !String::from_utf8_lossy(&std::fs::read(root.join("login-passwords.dpapi")).unwrap())
+                .contains("private-alice")
+        );
+        clear(&root).unwrap();
+        assert_eq!(
+            login_password(&root, "https://platform.example", "bob")
+                .unwrap()
+                .unwrap()
+                .1
+                .as_str(),
+            "private-bob"
+        );
+        remember_password(
+            &root,
+            "https://platform.example",
+            "alice",
+            "new-private-alice",
+        )
+        .unwrap();
+        assert_eq!(
+            login_password(&root, "https://platform.example", "alice")
+                .unwrap()
+                .unwrap()
+                .1
+                .as_str(),
+            "new-private-alice"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn login_state_is_portable_encrypted_and_separate_from_local_api_key() {
         let root = std::env::temp_dir().join(format!(

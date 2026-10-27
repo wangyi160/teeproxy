@@ -43,11 +43,14 @@ impl Default for Profile {
 #[serde(deny_unknown_fields)]
 pub struct Secrets {
     pub router_key: String,
+    #[serde(default)]
+    pub router_access: String,
     pub client_key: String,
 }
 impl Drop for Secrets {
     fn drop(&mut self) {
         self.router_key.zeroize();
+        self.router_access.zeroize();
         self.client_key.zeroize();
     }
 }
@@ -67,12 +70,11 @@ impl Profile {
             .parse()
             .context("监听 IP 必须是有效的 IPv4 或 IPv6 地址")?;
         ensure!(
-            ip.is_loopback() || !secrets.client_key.is_empty(),
-            "监听局域网或所有网卡时，请设置 API key"
+            !secrets.client_key.is_empty(),
+            "请设置 API key，不能为空"
         );
         ensure!(
-            secrets.client_key.is_empty()
-                || (16..=256).contains(&secrets.client_key.len())
+            (16..=256).contains(&secrets.client_key.len())
                     && secrets.client_key.bytes().all(|c| c.is_ascii_graphic()),
             "API key 须为 16–256 个可见 ASCII 字符"
         );
@@ -80,10 +82,15 @@ impl Profile {
         let config = Config {
             listen: (ip, self.port).into(),
             router: self.router.trim().to_owned(),
+            management_url: "https://teerouter.org".into(),
             router_key_env: "TEEPROXY_ROUTER_KEY".into(),
+            router_access_env: None,
+            user_signing_seed_env: None,
+            user_signer: None,
+            router_access: Zeroizing::new(secrets.router_access.clone()),
             tdx_policy: policy(&self.tdx_policy),
             snp_policy: policy(&self.snp_policy),
-            client_key_env: (!secrets.client_key.is_empty()).then(|| "TEEPROXY_CLIENT_KEY".into()),
+            client_key_env: Some("TEEPROXY_CLIENT_KEY".into()),
             pool: (!self.pool.trim().is_empty()).then(|| self.pool.trim().to_owned()),
             routing: self.routing.clone(),
             max_in_flight: 16,
@@ -367,6 +374,7 @@ mod tests {
         profile.snp_policy = "snp.json".into();
         let keys = Secrets {
             router_key: "private-router-token".into(),
+            router_access: String::new(),
             client_key: "private-local-token".into(),
         };
         // Old versions could store absolute and relative external paths.
@@ -431,7 +439,7 @@ mod tests {
         let path = temp.0.join("application/data/desktop.json");
         let mut profile = fixture_profile();
         profile.tdx_policy = external.to_str().unwrap().into();
-        let keys = Secrets::default();
+        let keys = Secrets { client_key: "test-local-client-key".into(), router_key: String::new(), router_access: String::new() };
         let first = save(&path, &profile, &keys).unwrap();
         let base = path.parent().unwrap();
         assert_eq!(
@@ -473,7 +481,7 @@ mod tests {
         let old = serde_json::to_vec(&Saved {
             version: 1,
             profile,
-            protected_secrets: crypt(&serde_json::to_vec(&Secrets::default()).unwrap(), true)
+            protected_secrets: crypt(&serde_json::to_vec(&Secrets { client_key: "test-local-client-key".into(), router_key: String::new(), router_access: String::new() }).unwrap(), true)
                 .unwrap()
                 .to_vec(),
         })
@@ -527,6 +535,7 @@ mod tests {
         };
         let secrets = Secrets {
             router_key: "test-router-key".into(),
+            router_access: String::new(),
             client_key: "test-local-key-123456".into(),
         };
         save(&path, &profile, &secrets).unwrap();
@@ -556,38 +565,30 @@ mod tests {
     }
 
     #[test]
-    fn legacy_profiles_remain_local_and_network_binds_require_a_valid_key() {
-        let mut profile: Profile =
-            serde_json::from_str(r#"{"router":"https://router.invalid","port":8899}"#).unwrap();
+    fn every_listen_address_requires_a_valid_api_key() {
+        let mut profile: Profile = serde_json::from_str(r#"{"router":"https://router.invalid","port":8899}"#).unwrap();
         let mut secrets = Secrets::default();
         assert_eq!(profile.listen_ip, "127.0.0.1");
-        assert_eq!(
-            crate::config::local_api_url(profile.config(&secrets, Path::new(".")).unwrap().listen),
-            "http://127.0.0.1:8899/v1"
-        );
-        for ip in ["0.0.0.0", "192.168.1.6", "::"] {
+        for ip in ["127.0.0.1", "::1", "0.0.0.0", "192.168.1.6", "::"] {
             profile.listen_ip = ip.into();
-            secrets.client_key.clear();
-            assert!(profile.config(&secrets, Path::new(".")).is_err());
-            secrets.client_key = "too-short".into();
-            assert!(profile.config(&secrets, Path::new(".")).is_err());
+            for invalid in ["", "too-short", "                ", "contains whitespace"] {
+                secrets.client_key = invalid.into();
+                assert!(profile.config(&secrets, Path::new(".")).is_err(), "{ip}");
+            }
             secrets.client_key = "test-local-client-key".into();
             profile.config(&secrets, Path::new(".")).unwrap();
         }
-        profile.listen_ip = "::1".into();
-        secrets.client_key.clear();
-        assert_eq!(
-            crate::config::local_api_url(profile.config(&secrets, Path::new(".")).unwrap().listen),
-            "http://[::1]:8899/v1"
-        );
-        for ip in [
-            "localhost",
-            "127.0.0.1:8899",
-            "http://192.168.1.6",
-            "invalid",
-        ] {
+        for ip in ["localhost", "127.0.0.1:8899", "http://192.168.1.6", "invalid"] {
             profile.listen_ip = ip.into();
             assert!(profile.config(&secrets, Path::new(".")).is_err());
         }
+        let temp = TestDirectory::new();
+        let path = temp.0.join("desktop.json");
+        let profile = fixture_profile();
+        save(&path, &profile, &secrets).unwrap();
+        let saved = std::fs::read(&path).unwrap();
+        secrets.client_key.clear();
+        assert!(save(&path, &profile, &secrets).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), saved);
     }
 }

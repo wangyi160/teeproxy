@@ -202,7 +202,6 @@ impl App {
                 },
                 crate::routing::format_multiplier(active.policy.max_multiplier_millionths)
             );
-            self.set(ROUTE_OVERVIEW, &active_summary);
             self.set(
                 ROUTE_CURRENT,
                 &if self.route_matches_active() {
@@ -212,9 +211,9 @@ impl App {
                 },
             );
         } else {
-            self.set(ROUTE_OVERVIEW, &summary);
             self.set(ROUTE_CURRENT, &format!("下次启动：{summary}"));
         }
+        self.update_overview();
     }
     pub(super) unsafe fn route_matches_active(&self) -> bool {
         self.live_proxy.as_ref().is_some_and(|proxy| {
@@ -246,6 +245,7 @@ impl App {
         // Persist first: invalid input or a failed disk write never changes live rules.
         let local = Secrets {
             router_key: String::new(),
+            router_access: String::new(),
             client_key: secrets.client_key.clone(),
         };
         let saved = settings::save(&self.path, profile, &local)?;

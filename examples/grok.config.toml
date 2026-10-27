@@ -1,0 +1,12 @@
+# Merge into ~/.grok/config.toml (Windows: %USERPROFILE%\.grok\config.toml).
+# TEEPROXY_AGENT_KEY holds the API key configured in teeproxy, not a provider key.
+[model.teeproxy]
+model = "grok/grok-4.7"
+base_url = "http://127.0.0.1:8899/v1"
+name = "Grok via teeproxy"
+env_key = "TEEPROXY_AGENT_KEY"
+api_backend = "responses"
+supports_backend_search = false
+
+[models]
+default = "teeproxy"

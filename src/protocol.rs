@@ -103,27 +103,18 @@ pub fn verify_binding(envelope: &EvidenceEnvelope, nonce: &str, certificate: &[u
     Ok(())
 }
 
+/// Model discovery is served from management snapshots, never Router.
+pub(crate) fn router_query(method: &str, path: &str) -> bool {
+    matches!(method, "GET" | "HEAD") && path == "/v1/models"
+}
+
+/// Only implemented public operations are exposed. Bodies remain opaque;
+/// provider matching, model authorization and billing belong to Router.
+pub(crate) fn known_api_path(path: &str) -> bool {
+    matches!(path, "/v1/models" | "/v1/responses" | "/v1/messages" | "/v1/chat/completions")
+}
+
 pub fn allowed_api(method: &str, path: &str) -> bool {
-    if path.contains('%') || path.contains("..") || path.contains('\\') {
-        return false;
-    }
-    matches!(
-        (method, path),
-        (
-            "GET",
-            "/v1/models"
-                | "/v1/pricing"
-                | "/v1/pools"
-                | "/v1/usage"
-                | "/v1/identity"
-                | "/v1/merchants"
-                | "/health/live"
-                | "/health/ready"
-        ) | (
-            "POST",
-            "/v1/chat/completions" | "/v1/responses" | "/v1/messages"
-        )
-    ) || (method == "POST"
-        && path.starts_with("/v1beta/models/")
-        && (path.ends_with(":generateContent") || path.ends_with(":streamGenerateContent")))
+    router_query(method, path)
+        || (method == "POST" && matches!(path, "/v1/responses" | "/v1/messages" | "/v1/chat/completions"))
 }

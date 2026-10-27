@@ -61,7 +61,7 @@ fn allowed(method: &str, route: &str) -> bool {
             && s != ".."
     };
     match (method, parts.as_slice()) {
-        ("GET", ["info" | "me" | "finance" | "payments"]) => true,
+        ("GET", ["info" | "me" | "finance" | "payments" | "pricing" | "inventory"]) => true,
         ("GET", ["receipts", "mine"]) => true,
         ("GET", ["receipts", "records", seq]) => {
             !seq.is_empty() && seq.bytes().all(|c| c.is_ascii_digit())
@@ -80,6 +80,7 @@ pub(super) fn error_message(code: &str, status: u16) -> String {
         "invalid_credentials" => "用户名或密码错误",
         "connection_revoked" => "此设备的连接权限已被停用，请联系管理员",
         "user_disabled" => "账户已停用",
+        "pricing_snapshot_pending" => "管理平台正在更新模型价格，请稍后重试",
         "username_unavailable" => "用户名已被注册",
         "registration_disabled" => "平台暂未开放注册",
         "invalid_password" | "password_incorrect" => "当前密码错误",

@@ -8,9 +8,8 @@ pub(super) const PAGE_TITLE: u16 = 559;
 pub(super) const PAGE_DESCRIPTION: u16 = 560;
 pub(super) const OPEN_SETTINGS: u16 = 561;
 pub(super) const SERVICE_STATE: u16 = 562;
-pub(super) const ROUTER_SUMMARY: u16 = 564;
-pub(super) const MODELS_EMPTY: u16 = 565;
-pub(super) const ACCOUNTS_EMPTY: u16 = 566;
+pub(super) const MODELS_LOADING: u16 = 565;
+pub(super) const ACCOUNTS_LOADING: u16 = 566;
 pub(super) const MODEL_COUNT: u16 = 567;
 pub(super) const POOL_COUNT: u16 = 568;
 pub(super) const OVERVIEW: usize = 0;
@@ -113,68 +112,13 @@ impl App {
         self.add(
             CATALOG_STATUS,
             w!("STATIC"),
-            "尚未读取列表",
+            "",
             SS_LEFT,
             [244, -74, -280, 22],
             2,
         )?;
 
-        self.building_page = Some(OVERVIEW);
-        self.label("本地接入地址", [268, 150, 360, 26], 3)?;
-        self.edit(
-            URL,
-            &profile
-                .listen_ip
-                .trim()
-                .parse::<std::net::IpAddr>()
-                .map(|ip| crate::config::local_api_url((ip, profile.port).into()))
-                .unwrap_or_default(),
-            [268, 198, -460, 40],
-            ES_READONLY as u32,
-            "",
-        )?;
-        self.button(COPY, "复制地址", [-168, 198, 108, 40], 0)?;
-        self.label(
-            "将此地址填入 Agent 的 API 地址（Base URL）。",
-            [268, 258, -316, 22],
-            2,
-        )?;
-        self.label("上游连接", [268, 342, 330, 26], 3)?;
-        self.add(
-            ROUTER_SUMMARY,
-            w!("STATIC"),
-            "",
-            SS_LEFT,
-            [268, 392, -316, 26],
-            0,
-        )?;
-        self.add(
-            ROUTE_OVERVIEW,
-            w!("STATIC"),
-            "尚未选择账号池",
-            SS_LEFT,
-            [268, 432, -316, 22],
-            2,
-        )?;
-        self.button(OPEN_SETTINGS, "Agent 接入", [-192, 336, 132, 38], 0)?;
-        self.label("池内模型总数", [268, 518, 220, 24], 2)?;
-        self.add(
-            MODEL_COUNT,
-            w!("STATIC"),
-            "未读取",
-            SS_LEFT,
-            [268, 552, 220, 34],
-            3,
-        )?;
-        self.label("上游账号池", [576, 518, 220, 24], 2)?;
-        self.add(
-            POOL_COUNT,
-            w!("STATIC"),
-            "未读取",
-            SS_LEFT,
-            [576, 552, 220, 34],
-            3,
-        )?;
+        self.build_overview(profile)?;
 
         self.build_inventory()?;
         self.building_page = Some(SETTINGS_PAGE);
@@ -230,49 +174,42 @@ impl App {
         self.build_routing(profile)?;
         self.build_pricing()?;
         self.build_account()?;
+        self.build_loading()?;
         self.update_summary();
         Ok(())
     }
 
     pub(super) unsafe fn update_summary(&self) {
         self.update_route_summary();
-        let router = self.text(ROUTER);
-        self.set(
-            ROUTER_SUMMARY,
-            if router.is_empty() {
-                "尚未配置 Router，请先完成连接设置。"
-            } else {
-                &router
-            },
-        );
-        self.set(
-            MODEL_COUNT,
-            &if self.catalog_loaded {
-                self.catalog.models.len().to_string()
-            } else {
-                "未读取".into()
-            },
-        );
-        self.set(
-            POOL_COUNT,
-            &if self.catalog_loaded {
-                self.catalog.pools.len().to_string()
-            } else {
-                "未读取".into()
-            },
-        );
     }
 
     pub(super) unsafe fn update_visibility(&self) {
         for control in &self.controls {
             let visible = match control.id {
                 REFRESH => matches!(self.page, INVENTORY_PAGE | ROUTE_PAGE | PRICE_PAGE),
-                PRICE_EMPTY => self.page == PRICE_PAGE && self.price_rows.is_empty(),
-                CATALOG_STATUS => self.page == INVENTORY_PAGE,
-                MODELS_EMPTY => self.page == INVENTORY_PAGE && self.model_rows.is_empty(),
-                POOLS_EMPTY => self.page == INVENTORY_PAGE && self.catalog.pools.is_empty(),
-                ACCOUNTS_EMPTY => {
+                PAGE_LOADING => self.page_loading(),
+                ACCOUNT_LOADING => self.account_table_loading(),
+                PRICE_LOADING => {
+                    self.page == PRICE_PAGE
+                        && self.inventory_task.is_some()
+                        && self.price_rows.is_empty()
+                }
+                CATALOG_STATUS => {
+                    self.page == INVENTORY_PAGE && !self.text(CATALOG_STATUS).is_empty()
+                }
+                MODELS_LOADING => {
                     self.page == INVENTORY_PAGE
+                        && self.inventory_task.is_some()
+                        && self.model_rows.is_empty()
+                }
+                POOLS_LOADING => {
+                    self.page == INVENTORY_PAGE
+                        && self.inventory_task.is_some()
+                        && self.catalog.pools.is_empty()
+                }
+                ACCOUNTS_LOADING => {
+                    self.page == INVENTORY_PAGE
+                        && self.inventory_task.is_some()
                         && self.account_pool().is_none_or(|p| p.account_count == 0)
                 }
                 _ => control.page.is_none_or(|page| {
@@ -284,7 +221,8 @@ impl App {
                 }),
             };
             let visible = visible
-                && (control.page != Some(ACCOUNT_PAGE) || self.account.visible(control.hwnd));
+                && (control.page != Some(ACCOUNT_PAGE) || self.account.visible(control.hwnd))
+                && !self.payment_hidden(control.id);
             ShowWindow(control.hwnd, if visible { SW_SHOW } else { SW_HIDE });
         }
     }
@@ -302,8 +240,24 @@ impl App {
         let (title, description) = PAGES[self.page];
         self.set(PAGE_TITLE, title);
         self.set(PAGE_DESCRIPTION, description);
-        if is_account_page(self.page) {
+        if is_account_page(self.page) || self.page == OVERVIEW {
             self.account_page_entered();
+        }
+        self.inventory_refresh_pending = matches!(self.page, OVERVIEW | INVENTORY_PAGE);
+        self.prices_refresh_pending = self.page == PRICE_PAGE;
+        if matches!(self.page, OVERVIEW | INVENTORY_PAGE) {
+            if !self.account.logged_in() {
+                self.set(CATALOG_STATUS, "未登录");
+            } else if self.router_key.is_empty() {
+                self.set(CATALOG_STATUS, "连接中");
+            }
+            self.refresh_inventory_if_due();
+        }
+        if self.page == OVERVIEW {
+            self.update_overview();
+        }
+        if self.page == PRICE_PAGE {
+            self.refresh_prices_if_due();
         }
         self.update_visibility();
         self.layout();
@@ -316,6 +270,9 @@ impl App {
 
     pub(super) unsafe fn control_background(&self, hwnd: HWND) -> u32 {
         if let Some(c) = self.controls.iter().find(|c| c.hwnd == hwnd) {
+            if self.payment_white_control(c.id) {
+                return rgb(255, 255, 255);
+            }
             if c.rect[0] >= 0 && c.rect[0] < 208 {
                 return rgb(241, 244, 249);
             }
@@ -324,12 +281,7 @@ impl App {
             {
                 return rgb(248, 250, 253);
             }
-            if c.page.is_some()
-                && !matches!(
-                    c.id,
-                    SEARCH | COPY_MODEL | USE_POOL | POOL_DETAILS | SAVE | VERIFY
-                )
-            {
+            if c.page.is_some() && !matches!(c.id, SEARCH | COPY_MODEL | USE_POOL | SAVE | VERIFY) {
                 return rgb(255, 255, 255);
             }
         }
@@ -365,11 +317,7 @@ impl App {
             DT_CENTER | DT_VCENTER | DT_SINGLELINE,
         );
         let cards: Vec<[i32; 4]> = match self.page {
-            OVERVIEW => vec![
-                [244, 128, -280, 176],
-                [244, 320, -280, 160],
-                [244, 496, -280, 116],
-            ],
+            OVERVIEW => overview_cards(width).to_vec(),
             SETTINGS_PAGE => vec![[244, 128, -280, 268]],
             TRUST_PAGE => vec![[244, 128, -280, 300]],
             INVENTORY_PAGE => inventory_cards(width, height).to_vec(),
@@ -387,6 +335,8 @@ impl App {
                 rgb(225, 231, 240),
             );
         }
+        self.paint_overview(dc, width, height);
+        self.paint_payment(dc, width, height);
         for (rect, page, hwnd) in &self.input_frames {
             if page.is_none_or(|page| {
                 if page == ACCOUNT_PAGE {
@@ -398,7 +348,11 @@ impl App {
             {
                 rounded(
                     dc,
-                    &self.scaled_rect(*rect, width, height),
+                    &self.scaled_rect(
+                        self.payment_frame(*hwnd, width).unwrap_or(*rect),
+                        width,
+                        height,
+                    ),
                     self.scale(6),
                     rgb(255, 255, 255),
                     if GetFocus() == *hwnd {
@@ -412,7 +366,7 @@ impl App {
         RestoreDC(dc, saved);
     }
 
-    unsafe fn scaled_rect(&self, rect: [i32; 4], width: i32, height: i32) -> RECT {
+    pub(super) unsafe fn scaled_rect(&self, rect: [i32; 4], width: i32, height: i32) -> RECT {
         let [x, y, w, h] = rect;
         let x = if x < 0 { width + x } else { x };
         let y = if y < 0 { height + y } else { y };
@@ -431,7 +385,7 @@ impl App {
         let saved = SaveDC(dc);
         let id = item.CtlID as u16;
         let nav = (NAV_FIRST..=NAV_LAST).contains(&id);
-        let active = (nav && (id - NAV_FIRST) as usize == self.page) || self.account.active_tab(id);
+        let active = nav && (id - NAV_FIRST) as usize == self.page;
         let disabled = item.itemState & ODS_DISABLED != 0;
         let pressed = item.itemState & ODS_SELECTED != 0;
         let primary = matches!(id, START | SAVE | SAVE_TRUST | 1515 | 1531 | 1539);
@@ -446,6 +400,25 @@ impl App {
         };
         let background = self.control_background(item.hwndItem);
         fill_rect(dc, &item.rcItem, background);
+        if overview_link(id) {
+            draw_text(
+                dc,
+                &self.text(id),
+                self.fonts[2],
+                item.rcItem,
+                if pressed {
+                    rgb(32, 67, 183)
+                } else {
+                    rgb(47, 93, 232)
+                },
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+            );
+            if item.itemState & ODS_FOCUS != 0 {
+                DrawFocusRect(dc, &item.rcItem);
+            }
+            RestoreDC(dc, saved);
+            return;
+        }
         let fill = if disabled {
             rgb(236, 240, 245)
         } else if active {
@@ -469,6 +442,11 @@ impl App {
             rgb(213, 221, 234)
         };
         rounded(dc, &item.rcItem, self.scale(7), fill, border);
+        if id == REFRESH && self.inventory_task.is_some() {
+            self.draw_loading_spinner(dc, &item.rcItem, true);
+            RestoreDC(dc, saved);
+            return;
+        }
         let mut rect = item.rcItem;
         let flags = if nav {
             let symbols: [&str; PAGES.len()] = [
@@ -508,11 +486,11 @@ impl App {
     }
 }
 
-unsafe fn fill_rect(dc: HDC, rect: &RECT, color: u32) {
+pub(super) unsafe fn fill_rect(dc: HDC, rect: &RECT, color: u32) {
     SetDCBrushColor(dc, color);
     FillRect(dc, rect, GetStockObject(DC_BRUSH) as HBRUSH);
 }
-unsafe fn rounded(dc: HDC, rect: &RECT, radius: i32, fill: u32, border: u32) {
+pub(super) unsafe fn rounded(dc: HDC, rect: &RECT, radius: i32, fill: u32, border: u32) {
     SelectObject(dc, GetStockObject(DC_BRUSH));
     SelectObject(dc, GetStockObject(DC_PEN));
     SetDCBrushColor(dc, fill);
@@ -527,7 +505,14 @@ unsafe fn rounded(dc: HDC, rect: &RECT, radius: i32, fill: u32, border: u32) {
         radius,
     );
 }
-unsafe fn draw_text(dc: HDC, value: &str, font: HFONT, mut rect: RECT, color: u32, flags: u32) {
+pub(super) unsafe fn draw_text(
+    dc: HDC,
+    value: &str,
+    font: HFONT,
+    mut rect: RECT,
+    color: u32,
+    flags: u32,
+) {
     SelectObject(dc, font);
     SetBkMode(dc, TRANSPARENT as i32);
     SetTextColor(dc, color);

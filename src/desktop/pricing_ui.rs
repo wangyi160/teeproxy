@@ -6,7 +6,7 @@ pub(super) const PRICE_PROVIDER: u16 = 702;
 pub(super) const PRICE_SEARCH: u16 = 703;
 pub(super) const PRICE_DETAILS: u16 = 704;
 pub(super) const PRICE_STATUS: u16 = 705;
-pub(super) const PRICE_EMPTY: u16 = 706;
+pub(super) const PRICE_LOADING: u16 = 706;
 pub(super) const PRICE_COUNT: u16 = 707;
 
 impl App {
@@ -24,7 +24,7 @@ impl App {
             SendMessageW(provider, CB_ADDSTRING, 0, wide(title).as_ptr() as isize);
         }
         SendMessageW(provider, CB_SETCURSEL, 0, 0);
-        self.edit(PRICE_SEARCH, "", [420, 130, -592, 36], 0, "搜索官方模型")?;
+        self.edit(PRICE_SEARCH, "", [420, 130, -592, 36], 0, "搜索模型")?;
         self.label(
             "美元 / 百万 Token · 官方基准价，实际费用另乘账号池倍率",
             [260, 184, -312, 24],
@@ -33,7 +33,7 @@ impl App {
         self.add(
             PRICE_COUNT,
             w!("STATIC"),
-            "完整官方价格簿 · 独立于账号池",
+            "",
             SS_LEFT,
             [260, 212, -312, 22],
             2,
@@ -50,11 +50,11 @@ impl App {
             ],
         )?;
         let empty = self.add(
-            PRICE_EMPTY,
+            PRICE_LOADING,
             w!("STATIC"),
-            "尚未读取官方价格\r\n\r\n完成连接设置后，点击“刷新价格”。",
-            SS_LEFT,
-            [292, 278, -376, 100],
+            "加载中",
+            windows_sys::Win32::System::SystemServices::SS_OWNERDRAW,
+            [292, 278, 48, 48],
             0,
         )?;
         SetWindowPos(
@@ -70,7 +70,7 @@ impl App {
         self.add(
             PRICE_DETAILS,
             w!("EDIT"),
-            "选择一行查看缓存写入价格、更新时间与官方来源。",
+            "",
             WS_TABSTOP
                 | WS_VSCROLL
                 | ES_MULTILINE as u32
@@ -82,7 +82,7 @@ impl App {
         self.add(
             PRICE_STATUS,
             w!("STATIC"),
-            "价格显示不代表当前账号池可调用该模型。",
+            "",
             SS_LEFT,
             [244, -74, -280, 22],
             2,
@@ -130,25 +130,13 @@ impl App {
             PRICE_COUNT,
             &if self.prices_loaded {
                 format!(
-                    "价格簿 v{} · 全部 {} 个模型 · 当前 {} 个计价档位",
+                    "价格簿 v{} · 可用 {} 个模型 · 当前 {} 个计价档位",
                     self.price_book.revision,
                     self.price_book.models,
                     rows.len()
                 )
             } else {
-                "完整官方价格簿 · 独立于账号池".into()
-            },
-        );
-        self.set(
-            PRICE_EMPTY,
-            if self.prices_loaded {
-                if self.price_book.rows.is_empty() {
-                    "Router 尚未发布官方价格。"
-                } else {
-                    "没有匹配的官方模型\r\n\r\n请修改搜索或提供商筛选。"
-                }
-            } else {
-                "尚未读取官方价格\r\n\r\n完成连接设置后，点击“刷新价格”。"
+                String::new()
             },
         );
         if !rows.is_empty() {
@@ -179,34 +167,48 @@ impl App {
                     r.provider, r.model, r.condition, r.details
                 )
             })
-            .unwrap_or_else(|| "选择一行查看缓存写入价格、更新时间与官方来源。".into()),
+            .unwrap_or_default(),
         );
     }
     pub(super) unsafe fn invalidate_prices(&mut self) {
         self.price_book = Default::default();
         self.prices_loaded = false;
+        self.prices_refresh_pending = self.page == PRICE_PAGE;
         self.render_prices();
-        self.set(PRICE_STATUS, "连接设置已修改，请刷新官方价格。");
+        self.set(PRICE_STATUS, "");
+    }
+    pub(super) unsafe fn refresh_prices_if_due(&mut self) {
+        if self.page != PRICE_PAGE
+            || !self.prices_refresh_pending
+            || !self.account.logged_in()
+            || self.inventory_task.is_some()
+            || self.stopping
+            || (self.task.is_some() && !self.running)
+        {
+            return;
+        }
+        self.prices_refresh_pending = false;
+        if let Err(error) = self.refresh_prices() {
+            self.set(PRICE_STATUS, "刷新失败");
+            self.action_failed(REFRESH, &error);
+        }
     }
     pub(super) unsafe fn refresh_prices(&mut self) -> Result<()> {
         if self.inventory_task.is_some() || self.stopping || (self.task.is_some() && !self.running)
         {
             return Ok(());
         }
-        let (profile, secrets) = self.snapshot()?;
-        ensure!(!secrets.router_key.is_empty(), "请先登录账户并等待连接就绪");
-        let config = profile.config(&secrets, self.path.parent().unwrap())?;
+        let client = self.account.pricing_client().context("请先登录账户")?;
+        self.prices_refresh_pending = false;
         self.inventory_generation += 1;
         self.inventory_finished_observed = false;
         let generation = self.inventory_generation;
         let sender = self.sender.clone();
         self.inventory_task = Some(self.runtime.spawn(async move {
-            let result = pricing::fetch(&config, &secrets.router_key)
-                .await
-                .map_err(|e| redact(&format!("{e:#}"), &secrets));
+            let result = pricing::fetch(&client).await.map_err(|e| format!("{e:#}"));
             let _ = sender.send(Event::Prices(generation, result));
         }));
-        self.set(PRICE_STATUS, "正在通过 TEE 验证通道读取完整官方价格…");
+        self.set(PRICE_STATUS, "");
         self.busy(self.task.is_some());
         Ok(())
     }
