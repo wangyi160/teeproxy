@@ -10,8 +10,6 @@ use payment_card::{payment_payable, unix_now};
 
 pub(super) const PLATFORM: u16 = 1511;
 const USERNAME: u16 = 1512;
-const PASSWORD: u16 = 1513;
-const NAME: u16 = 1514;
 const SUBMIT: u16 = 1515;
 const SWITCH: u16 = 1516;
 const IDENTITY: u16 = 1518;
@@ -27,21 +25,12 @@ const DETAIL: u16 = 1532;
 const COPY: u16 = 1533;
 const PREV: u16 = 1534;
 const NEXT: u16 = 1535;
-const CURRENT: u16 = 1537;
-const NEW_PASSWORD: u16 = 1538;
-const CHANGE_PASSWORD: u16 = 1539;
 const COPY_AMOUNT: u16 = 1540;
 const PAGE: u16 = 1541;
 const BALANCE: u16 = 1542;
 const GO_LOGIN: u16 = 1543;
-const ACCOUNT_NAME: u16 = 1546;
 const CONNECTION_STATE: u16 = 1547;
 const USAGE_SUMMARY: u16 = 1548;
-const STORED_PASSWORD: u16 = 1549;
-const SHOW_PASSWORD: u16 = 1550;
-const SHOW_STORED: u16 = 1551;
-const SHOW_CURRENT: u16 = 1552;
-const SHOW_NEW: u16 = 1553;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(super) enum Panel {
@@ -78,8 +67,7 @@ impl Panel {
 #[derive(Clone, Copy)]
 enum Group {
     Always,
-    Guest,
-    Register,
+    Picker,
     Locked,
     Member,
     Panel(Panel),
@@ -91,7 +79,6 @@ pub(super) enum Action {
     Login,
     Register,
     Logout,
-    Password,
     Bind,
     Payment,
     CheckPayment,
@@ -104,14 +91,14 @@ pub(super) struct Reply {
     cursor: String,
     pub result: std::result::Result<Value, Failure>,
     session: Zeroizing<Vec<u8>>,
-    password: Option<Zeroizing<String>>,
 }
 pub(super) struct State {
     client: Option<Arc<AccountClient>>,
     base: String,
     pub task: Option<JoinHandle<()>>,
     pub panel: Panel,
-    register: bool,
+    key_id: String,
+    local_ids: Vec<String>,
     me: Value,
     view: Value,
     groups: HashMap<usize, Group>,
@@ -139,7 +126,8 @@ impl Default for State {
             base: String::new(),
             task: None,
             panel: Panel::Overview,
-            register: false,
+            key_id: String::new(),
+            local_ids: Vec::new(),
             me: Value::Null,
             view: Value::Null,
             groups: HashMap::new(),
@@ -181,7 +169,7 @@ impl State {
             .zip(integer(&balance["spent_microusd"]))
             .map(|(ceiling, spent)| Value::String((ceiling - spent).to_string()))
             .unwrap_or(Value::Null);
-        (text(&self.me["account"]["username"]), money(&available))
+        (text(&self.me["account"]["identity_id"]), money(&available))
     }
     pub fn table_loading(&self) -> bool {
         self.logged_in() && self.panel.has_table() && self.rows.is_empty() && self.task.is_some()
@@ -207,8 +195,7 @@ impl State {
     pub fn visible(&self, hwnd: HWND) -> bool {
         let logged = self.logged_in();
         match self.groups.get(&(hwnd as usize)) {
-            Some(Group::Guest) => !logged && self.panel == Panel::Overview,
-            Some(Group::Register) => !logged && self.register && self.panel == Panel::Overview,
+            Some(Group::Picker) => self.panel == Panel::Overview,
             Some(Group::Locked) => !logged && self.panel != Panel::Overview,
             Some(Group::Member) => logged,
             Some(Group::Panel(panel)) => logged && self.panel == *panel,
@@ -277,59 +264,15 @@ fn status(value: &Value) -> String {
     .into()
 }
 impl App {
-    unsafe fn hide_account_passwords(&self) {
-        for (input, button) in [
-            (PASSWORD, SHOW_PASSWORD),
-            (STORED_PASSWORD, SHOW_STORED),
-            (CURRENT, SHOW_CURRENT),
-            (NEW_PASSWORD, SHOW_NEW),
-        ] {
-            SendMessageW(input.hwnd(self), EM_SETPASSWORDCHAR, 0x25cf, 0);
-            self.set(button, "显示密码");
-            InvalidateRect(input.hwnd(self), ptr::null(), 1);
-        }
-    }
-    pub(super) unsafe fn restore_saved_password(&mut self) -> Result<()> {
-        let logged = self.account.logged_in();
-        if !logged && self.account.register {
-            return Ok(());
-        }
-        let base = if logged {
-            self.account.base.clone()
-        } else {
-            self.text(PLATFORM)
-        };
-        let base = account_client::platform(&base)?;
-        let username = if logged {
-            text(&self.account.me["account"]["username"])
-        } else {
-            self.text(USERNAME).trim().to_owned()
-        };
-        let saved = identity::login_password(self.path.parent().unwrap(), &base, &username)?;
-        self.set(STORED_PASSWORD, "");
-        if let Some((username, password)) = saved {
-            self.set(USERNAME, &username);
-            self.set(if logged { STORED_PASSWORD } else { PASSWORD }, &password);
-            if logged && self.text(CURRENT).is_empty() {
-                self.set(CURRENT, &password);
-            }
-        } else if !logged {
-            self.set(PASSWORD, "");
-        }
+    pub(super) unsafe fn refresh_local_identities(&mut self) -> Result<()> {
+        self.account.local_ids=identity::identities(self.path.parent().unwrap(),&account_client::platform(&self.text(PLATFORM))?)?;
+        SendMessageW(USERNAME.hwnd(self),CB_RESETCONTENT,0,0);
+        for id in &self.account.local_ids { SendMessageW(USERNAME.hwnd(self),CB_ADDSTRING,0,wide(id).as_ptr() as isize); }
+        let selected=self.account.local_ids.iter().position(|id|id==&self.account.key_id).unwrap_or(0);
+        SendMessageW(USERNAME.hwnd(self),CB_SETCURSEL,selected,0);
         Ok(())
     }
-    pub(super) unsafe fn login_username_changed(&mut self, load: bool) {
-        if !self.account.logged_in() && !self.account.register {
-            if load {
-                if let Err(error) = self.restore_saved_password() {
-                    self.set(FEEDBACK, &error.to_string());
-                }
-            } else {
-                self.set(PASSWORD, "");
-                self.hide_account_passwords();
-            }
-        }
-    }
+    pub(super) unsafe fn login_username_changed(&mut self,_load:bool) {}
     unsafe fn account_group(&mut self, start: usize, group: Group) {
         for c in &self.controls[start..] {
             self.account.groups.insert(c.hwnd as usize, group);
@@ -341,19 +284,12 @@ impl App {
         self.add(FEEDBACK, w!("STATIC"), "", SS_LEFT, [260, -75, -312, 42], 2)?;
         self.account_group(start, Group::Always);
         let start = self.controls.len();
-        self.label("用户名", [300, 180, 150, 24], 0)?;
-        self.edit(USERNAME, "", [300, 214, 460, 42], 0, "")?;
-        self.label("密码", [300, 282, 150, 24], 0)?;
-        self.edit(PASSWORD, "", [300, 316, 348, 42], ES_PASSWORD as u32, "")?;
-        self.button(SHOW_PASSWORD, "显示密码", [660, 316, 100, 42], 0)?;
-        self.button(SUBMIT, "登录", [300, 496, 160, 42], 0)?;
-        self.button(SWITCH, "注册新账号", [480, 496, 180, 42], 0)?;
-        self.account_group(start, Group::Guest);
-        let start = self.controls.len();
-        self.label("名称", [300, 384, 150, 24], 0)?;
-        self.edit(NAME, "", [300, 418, 460, 42], 0, "")?;
-        self.account_group(start, Group::Register);
-        let start = self.controls.len();
+        self.label("本地 ID",[268,190,150,24],0)?;
+        self.add(USERNAME,w!("COMBOBOX"),"",WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,[268,224,-330,260],0)?;
+        self.button(SUBMIT,"使用此 ID",[268,278,150,40],0)?;
+        self.button(SWITCH,"注册新 ID",[434,278,150,40],0)?;
+        self.account_group(start,Group::Picker);
+        let start=self.controls.len();
         self.add(IDENTITY, w!("STATIC"), "", SS_LEFT, [260, 134, -590, 28], 3)?;
 
         self.account_group(start, Group::Member);
@@ -362,36 +298,11 @@ impl App {
         self.button(GO_LOGIN, "前往登录", [268, 264, 150, 40], 0)?;
         self.account_group(start, Group::Locked);
         let start = self.controls.len();
-        self.label("用户名", [268, 210, 132, 24], 0)?;
-        self.add(SUMMARY, w!("STATIC"), "", SS_LEFT, [420, 210, -480, 28], 3)?;
-        self.label("密码", [268, 262, 132, 24], 0)?;
-        self.edit(
-            STORED_PASSWORD,
-            "",
-            [420, 252, -596, 40],
-            (ES_PASSWORD | ES_READONLY) as u32,
-            "",
-        )?;
-        self.button(SHOW_STORED, "显示密码", [-160, 252, 100, 40], 0)?;
-        self.label("名称", [268, 314, 132, 24], 0)?;
-        self.add(
-            ACCOUNT_NAME,
-            w!("STATIC"),
-            "",
-            SS_LEFT,
-            [420, 314, -480, 26],
-            0,
-        )?;
-        self.label("连接状态", [268, 366, 132, 24], 0)?;
-        self.add(
-            CONNECTION_STATE,
-            w!("STATIC"),
-            "",
-            SS_LEFT,
-            [420, 366, -480, 26],
-            0,
-        )?;
-        self.button(LOGOUT, "退出登录", [268, 412, 132, 38], 0)?;
+        self.label("当前 ID",[268,356,132,24],0)?;
+        self.edit(SUMMARY,"",[268,390,-330,40],ES_READONLY as u32,"")?;
+        self.label("连接状态",[268,456,132,24],0)?;
+        self.add(CONNECTION_STATE,w!("STATIC"),"",SS_LEFT,[420,456,-480,26],0)?;
+        self.button(LOGOUT,"退出此 ID",[268,516,132,38],0)?;
         self.account_group(start, Group::Panel(Panel::Overview));
         let start = self.controls.len();
         self.table(
@@ -438,21 +349,6 @@ impl App {
         self.button(COPY_AMOUNT, "复制付款金额", [492, -122, 150, 34], 0)?;
         self.account_group(start, Group::Panel(Panel::Payments));
         let start = self.controls.len();
-        self.label("当前密码", [268, 488, 132, 24], 0)?;
-        self.edit(CURRENT, "", [420, 478, -596, 40], ES_PASSWORD as u32, "")?;
-        self.button(SHOW_CURRENT, "显示密码", [-160, 478, 100, 40], 0)?;
-        self.label("新密码", [268, 546, 132, 24], 0)?;
-        self.edit(
-            NEW_PASSWORD,
-            "",
-            [420, 536, -596, 40],
-            ES_PASSWORD as u32,
-            "",
-        )?;
-        self.button(SHOW_NEW, "显示密码", [-160, 536, 100, 40], 0)?;
-        self.button(CHANGE_PASSWORD, "修改密码", [420, 596, 160, 40], 0)?;
-        self.account_group(start, Group::Panel(Panel::Overview));
-        let start = self.controls.len();
         self.add(
             USAGE_SUMMARY,
             w!("STATIC"),
@@ -462,16 +358,7 @@ impl App {
             3,
         )?;
         self.account_group(start, Group::Panel(Panel::Finance));
-        for (id, max) in [
-            (USERNAME, 64),
-            (PASSWORD, 512),
-            (NAME, 128),
-            (CURRENT, 512),
-            (NEW_PASSWORD, 512),
-            (AMOUNT, 20),
-        ] {
-            SendMessageW(self.by_id[&id], EM_SETLIMITTEXT, max, 0);
-        }
+        SendMessageW(AMOUNT.hwnd(self), EM_SETLIMITTEXT, 20, 0);
         self.building_page = None;
         Ok(())
     }
@@ -482,8 +369,7 @@ impl App {
                 let mutating = matches!(
                     control.id,
                     USERNAME
-                        | PASSWORD
-                        | NAME
+
                         | SUBMIT
                         | SWITCH
                         | LOGOUT
@@ -492,9 +378,7 @@ impl App {
                         | PAY
                         | PREV
                         | NEXT
-                        | CURRENT
-                        | NEW_PASSWORD
-                        | CHANGE_PASSWORD
+
                         | DETAIL
                 );
                 EnableWindow(control.hwnd, (ready || !mutating) as i32);
@@ -519,8 +403,7 @@ impl App {
         self.loading_tick();
     }
     pub(super) unsafe fn account_page_entered(&mut self) {
-        self.hide_account_passwords();
-        if let Err(error) = self.restore_saved_password() {
+        if let Err(error) = self.refresh_local_identities() {
             self.set(FEEDBACK, &error.to_string());
         }
         let panel = Panel::for_page(self.page);
@@ -562,15 +445,16 @@ impl App {
         let sender = self.sender.clone();
         let method = method.to_owned();
         let panel = self.account.panel;
-        let password = match action {
-            Action::Login | Action::Register => body["password"].as_str(),
-            Action::Password => body["new_password"].as_str(),
-            _ => None,
-        }
-        .map(|p| Zeroizing::new(p.to_owned()));
+        let signer=self.user_signer().ok();
         self.account.task = Some(self.runtime.spawn(async move {
-            let result = if action == Action::Load {
-                client.load(&route).await
+            let result = if matches!(action,Action::Login|Action::Register) {
+                match &signer { Some(key)=>client.identity_login(key,&route).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()}) }
+            } else if action == Action::Load {
+                let mut result=client.load(&route).await;
+                if result.as_ref().is_err_and(|e|e.status==401) {
+                    if let Some(key)=&signer {result=match client.identity_login(key,"login").await {Ok(_)=>client.load(&route).await,Err(e)=>Err(e)};}
+                }
+                result
             } else {
                 client.request(&method, &route, body, &operation).await
             };
@@ -581,7 +465,6 @@ impl App {
                 cursor,
                 result,
                 session: client.saved_session().await,
-                password,
             }));
         }));
         self.set(FEEDBACK, "");
@@ -617,98 +500,20 @@ impl App {
         Ok(self.account.attempt.as_ref().unwrap().1.clone())
     }
     pub(super) unsafe fn account_action(&mut self, id: u16) -> Result<()> {
-        if let Some(input) = match id {
-            SHOW_PASSWORD => Some(PASSWORD),
-            SHOW_STORED => Some(STORED_PASSWORD),
-            SHOW_CURRENT => Some(CURRENT),
-            SHOW_NEW => Some(NEW_PASSWORD),
-            _ => None,
-        } {
-            let show = SendMessageW(input.hwnd(self), EM_GETPASSWORDCHAR, 0, 0) != 0;
-            SendMessageW(
-                input.hwnd(self),
-                EM_SETPASSWORDCHAR,
-                if show { 0 } else { 0x25cf },
-                0,
-            );
-            self.set(id, if show { "隐藏密码" } else { "显示密码" });
-            InvalidateRect(input.hwnd(self), ptr::null(), 1);
-            return Ok(());
-        }
-        if id == GO_LOGIN {
-            self.select_page(ACCOUNT_PAGE);
-            return Ok(());
-        }
-        if self.account.task.is_some() && !matches!(id, COPY | COPY_AMOUNT) {
-            return Ok(());
-        }
-        if id == SWITCH {
-            self.account.register = !self.account.register;
-            self.set(PASSWORD, "");
-            self.hide_account_passwords();
-            if !self.account.register {
-                self.restore_saved_password()?;
-            }
-            self.set(
-                SUBMIT,
-                if self.account.register {
-                    "注册"
-                } else {
-                    "登录"
-                },
-            );
-            self.set(
-                SWITCH,
-                if self.account.register {
-                    "已有账号，登录"
-                } else {
-                    "注册新账号"
-                },
-            );
-            self.set(FEEDBACK, "");
-            self.update_visibility();
-            self.layout();
-            return Ok(());
-        }
-        if id == SUBMIT {
-            let base = account_client::platform(&self.text(PLATFORM))?;
-            let username = self.text(USERNAME).trim().to_owned();
-            ensure!(
-                (3..=64).contains(&username.len())
-                    && username
-                        .bytes()
-                        .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c)),
-                "用户名须为 3–64 位字母、数字、点、下划线或连字符"
-            );
-            let password = Zeroizing::new(self.text(PASSWORD));
-            ensure!(!password.is_empty() && password.len() <= 512, "请填写密码");
-            let registering = self.account.register;
-            if registering {
-                ensure!(password.chars().count() >= 12, "密码至少 12 个字符");
-                ensure!(!self.text(NAME).trim().is_empty(), "请填写名称");
-            }
-            self.disconnect_identity()?;
-            self.account.clear();
-            self.account.base = base.clone();
-            self.account.client = Some(Arc::new(AccountClient::new(&base)?));
-            let body = if registering {
-                json!({"username":username,"password":password.as_str(),"name":self.text(NAME).trim(),"role":"user"})
-            } else {
-                json!({"username":username,"password":password.as_str()})
+        if id == GO_LOGIN { self.select_page(ACCOUNT_PAGE);return Ok(()); }
+        if self.account.task.is_some() && !matches!(id,COPY|COPY_AMOUNT) {return Ok(());}
+        if matches!(id,SUBMIT|SWITCH) {
+            let base=account_client::platform(&self.text(PLATFORM))?;
+            let registering=id==SWITCH;
+            let key_id=if registering {identity::create(self.path.parent().unwrap(),&base)?} else {
+                let index=SendMessageW(USERNAME.hwnd(self),CB_GETCURSEL,0,0);
+                self.account.local_ids.get(index as usize).cloned().context("请选择本地 ID，或注册新 ID")?
             };
-            self.set(PASSWORD, "");
-            return self.submit_account(
-                if registering {
-                    Action::Register
-                } else {
-                    Action::Login
-                },
-                "POST",
-                if registering { "register" } else { "login" }.into(),
-                body,
-                (0, String::new()),
-                String::new(),
-            );
+            self.disconnect_identity()?;self.account.clear();
+            self.account.key_id=key_id;self.account.base=base.clone();
+            self.account.client=Some(Arc::new(AccountClient::new(&base)?));
+            self.refresh_local_identities()?;self.render_account();
+            return self.submit_account(if registering {Action::Register}else{Action::Login},"POST",if registering {"register"}else{"login"}.into(),json!({}),(0,String::new()),String::new());
         }
         ensure!(self.account.logged_in(), "请先登录");
         let action;
@@ -766,20 +571,6 @@ impl App {
                 method = "POST";
                 route = "payments".into();
                 body = json!({"amount":amount,"network":network});
-            }
-            CHANGE_PASSWORD => {
-                let current = Zeroizing::new(self.text(CURRENT));
-                let next = Zeroizing::new(self.text(NEW_PASSWORD));
-                ensure!(
-                    !current.is_empty() && next.chars().count() >= 12,
-                    "请填写当前密码，新密码至少 12 个字符"
-                );
-                body = json!({"current_password":current.as_str(),"new_password":next.as_str()});
-                self.set(CURRENT, "");
-                self.set(NEW_PASSWORD, "");
-                action = Action::Password;
-                method = "POST";
-                route = "password".into();
             }
             COPY => {
                 if self.account.panel == Panel::Payments {
@@ -890,19 +681,12 @@ impl App {
         self.set(
             IDENTITY,
             &if logged {
-                text(&self.account.me["account"]["username"])
+                text(&self.account.me["account"]["identity_id"])
             } else {
                 String::new()
             },
         );
         self.set(DETAILS, "");
-        if logged {
-            if let Err(error) = self.restore_saved_password() {
-                self.set(FEEDBACK, &error.to_string());
-            }
-        } else {
-            self.set(STORED_PASSWORD, "");
-        }
         if logged {
             let balance = &self.account.me["balance"];
             let available = integer(&balance["ceiling_microusd"])
@@ -917,8 +701,8 @@ impl App {
                     format!("可用余额　{}", money(&available))
                 },
             );
-            self.set(SUMMARY, &text(&self.account.me["account"]["username"]));
-            self.set(ACCOUNT_NAME, &text(&self.account.me["account"]["name"]));
+            self.set(SUMMARY, &text(&self.account.me["account"]["identity_id"]));
+
             self.set(
                 CONNECTION_STATE,
                 if !self.account.connection_problem.is_empty() {
@@ -945,7 +729,6 @@ impl App {
         } else {
             self.set(SUMMARY, "");
             self.set(BALANCE, "");
-            self.set(ACCOUNT_NAME, "");
             self.set(CONNECTION_STATE, "");
             self.set(USAGE_SUMMARY, "");
         }
@@ -1090,8 +873,7 @@ impl App {
                     self.account.clear();
                     self.account.client = None;
                     self.render_account();
-                    self.hide_account_passwords();
-                    let _ = self.restore_saved_password();
+                    let _ = self.refresh_local_identities();
                 }
                 if action == Action::Bind {
                     self.account.bind_retry =
@@ -1105,20 +887,6 @@ impl App {
                 return;
             }
         };
-        let password_save_error = reply.password.and_then(|password| {
-            let username = if matches!(action, Action::Login | Action::Register) {
-                text(&value["account"]["username"])
-            } else {
-                text(&self.account.me["account"]["username"])
-            };
-            identity::remember_password(
-                self.path.parent().unwrap(),
-                &self.account.base,
-                &username,
-                &password,
-            )
-            .err()
-        });
         if action == Action::Payment {
             self.account.attempt = None;
         }
@@ -1144,7 +912,6 @@ impl App {
                 self.accept_router_access(&value["router_access"]);
                 self.account.me = value;
                 self.account.bind_retry = true;
-                self.account.register = false;
                 self.account.refresh_pending =
                     is_account_page(self.page) && self.page != ACCOUNT_PAGE;
                 let save = (|| -> Result<()> {
@@ -1229,28 +996,21 @@ impl App {
                 }
                 self.set(FEEDBACK, "");
             }
-            Action::Logout | Action::Password => {
+            Action::Logout => {
                 let _ = self.disconnect_identity();
                 self.account.clear();
                 self.account.client = None;
-                self.set(PASSWORD, "");
-                self.set(CURRENT, "");
-                self.set(NEW_PASSWORD, "");
-                self.hide_account_passwords();
-                let _ = self.restore_saved_password();
-                self.set(SUBMIT, "登录");
-                self.set(SWITCH, "注册新账号");
+
+                let _ = self.refresh_local_identities();
+                self.set(SUBMIT, "使用此 ID");
+                self.set(SWITCH, "注册新 ID");
                 if is_account_page(self.page) {
                     self.select_page(ACCOUNT_PAGE);
                 }
                 self.render_account();
                 self.set(
                     FEEDBACK,
-                    if action == Action::Password {
-                        "密码已修改，请重新登录"
-                    } else {
-                        "已退出登录"
-                    },
+                    "已退出此 ID",
                 );
             }
             Action::Receipt => {
@@ -1286,9 +1046,6 @@ impl App {
             self.set(FEEDBACK, &e.to_string());
         }
         self.finish_account_refresh();
-        if let Some(error) = password_save_error {
-            self.set(FEEDBACK, &format!("密码未能保存：{error}"));
-        }
     }
     unsafe fn finish_account_refresh(&mut self) {
         if self.account.refresh_pending
@@ -1301,7 +1058,8 @@ impl App {
         }
     }
     pub(super) fn user_signer(&self) -> Result<crate::user_auth::Signer> {
-        identity::signer(self.path.parent().unwrap(), &self.account.base, self.account.me["account"]["id"].as_str().context("请先登录账户")?)
+        if !self.account.key_id.is_empty(){ return identity::key(self.path.parent().unwrap(),&self.account.base,&self.account.key_id); }
+        identity::signer(self.path.parent().unwrap(), &self.account.base, self.account.me["account"]["id"].as_str().context("请选择身份")?)
     }
     unsafe fn bind_account(&mut self) -> Result<()> {
         let device = identity::device(self.path.parent().unwrap())?;
@@ -1370,7 +1128,7 @@ impl App {
         identity::save(
             self.path.parent().unwrap(),
             &json!({
-                "version":1,"user_auth_version":1,"public_key":self.user_signer()?.public_key(),"platform":self.account.base,"account":self.account.me["account"],
+                "version":1,"user_auth_version":2,"identity_id":self.account.key_id,"public_key":self.user_signer()?.public_key(),"platform":self.account.base,"account":self.account.me["account"],
                 "connection_id":self.account.connection_id,"credential":self.router_key.as_str(),
                 "router_access":self.router_access.read().unwrap().as_str(),
                 "router_url":self.text(ROUTER),"session":session
@@ -1386,24 +1144,12 @@ impl App {
             "登录信息无效"
         );
         let base = account_client::platform(saved["platform"].as_str().context("平台地址无效")?)?;
-        let client = AccountClient::restore(&base, &saved["session"])?;
-        self.account.base = base.clone();
-        self.set(PLATFORM, &base);
-        self.account.client = Some(Arc::new(client));
-        self.account.me = json!({"account":saved["account"]});
-        self.router_key = Zeroizing::new(saved["credential"].as_str().unwrap_or("").to_owned());
-        *self.router_access.write().unwrap() = Zeroizing::new(saved["router_access"].as_str().unwrap_or("").to_owned());
-        self.account.connection_id = saved["connection_id"].as_str().unwrap_or("").to_owned();
-        self.set(ROUTER, saved["router_url"].as_str().unwrap_or(""));
-        self.account.session = Zeroizing::new(serde_json::to_vec(&saved["session"])?);
-        if saved["user_auth_version"] == 1 { ensure!(saved["public_key"] == self.user_signer()?.public_key(), "本地签名凭据不匹配，请恢复原数据目录"); }
-        self.account.bind_retry =
-            saved["user_auth_version"] != 1 || (self.router_key.is_empty() && self.account.connection_id.is_empty());
-        if saved["user_auth_version"] != 1 { self.router_key = Zeroizing::new(String::new()); self.account.connection_id.clear(); }
-        // Verify the restored session before enabling this account's proxy.
-        self.account.connection_ready = false;
-        self.render_account();
-        self.account_load(0, String::new())
+        self.account.key_id=identity::migrate(self.path.parent().unwrap(),&saved)?;
+        self.account.base=base.clone();self.set(PLATFORM,&base);
+        self.account.client=Some(Arc::new(AccountClient::new(&base)?));
+        self.set(ROUTER,saved["router_url"].as_str().unwrap_or(""));
+        self.account.connection_ready=false;self.refresh_local_identities()?;self.render_account();
+        self.submit_account(Action::Login,"POST","login".into(),json!({}),(0,String::new()),String::new())
     }
     unsafe fn accept_router_access(&mut self, value: &Value) {
         if let Some(token) = value["token"].as_str().filter(|s| !s.is_empty() && s.len() <= 2048) {
@@ -1572,7 +1318,11 @@ mod tests {
             );
             assert!(app.text(CATALOG_STATUS).contains("登录"));
             app.page = ACCOUNT_PAGE;
-            let view = json!({"account":{"id":"fixture-account","role":"user","username":"fixture-user","name":"Fixture"},"balance":{"enabled":true,"ceiling_microusd":20000000,"spent_microusd":500001},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
+            app.account.base="https://example.invalid".into();
+            app.account.key_id=identity::create(&root,&app.account.base).unwrap();
+            let fixture_id=app.account.key_id.clone();
+            let fixture_public=app.user_signer().unwrap().public_key();
+            let view = json!({"account":{"id":"fixture-account","identity_id":fixture_id,"public_key":fixture_public,"role":"user","name":"Fixture"},"balance":{"enabled":true,"ceiling_microusd":20000000,"spent_microusd":500001},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
             let login = view.clone();
             let me = view.clone();
             let payment_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -1582,6 +1332,9 @@ mod tests {
             let payment_post = payment_state.clone();
             let first_bind = Arc::new(std::sync::atomic::AtomicBool::new(true));
             let mock=Router::new()
+                .route("/portal/api/identity/challenge",post(|headers:HeaderMap,Json(body):Json<Value>|async move{
+                    Json(json!({"challenge":{"id":"ic_fixture","nonce":"fixture-nonce","expires":unix_now()+300,"origin":format!("http://{}",headers["host"].to_str().unwrap()),"role":"user","public_key":body["public_key"],"purpose":body["purpose"]}}))
+                }))
                 .route("/portal/api/login",post(move ||{let mut v=login.clone();v["csrf"]=json!("fixture-csrf");async move {([("set-cookie","teerouter_portal=fixture; HttpOnly")],Json(v))}}))
                 .route("/portal/api/me",get(move |headers:HeaderMap|{let v=me.clone();async move {assert_eq!(headers["cookie"],"teerouter_portal=fixture");Json(v)}}))
                 .route("/portal/api/connection",post(move |headers:HeaderMap,Json(body):Json<Value>| {
@@ -1624,38 +1377,24 @@ mod tests {
                 Action::Login,
                 "POST",
                 "login".into(),
-                json!({"username":"fixture-user","password":"example-password"}),
+                json!({"username":fixture_id.as_str(),"password":"example-password"}),
                 (0, String::new()),
                 String::new(),
             )
             .unwrap();
             complete(&mut app);
             assert!(app.account.logged_in());
-            assert_eq!(app.text(STORED_PASSWORD), "example-password");
-            assert_ne!(
-                SendMessageW(STORED_PASSWORD.hwnd(&app), EM_GETPASSWORDCHAR, 0, 0),
-                0
-            );
-            app.account_action(SHOW_STORED).unwrap();
-            assert_eq!(
-                SendMessageW(STORED_PASSWORD.hwnd(&app), EM_GETPASSWORDCHAR, 0, 0),
-                0
-            );
-            app.account_action(SHOW_STORED).unwrap();
-            assert_ne!(
-                SendMessageW(STORED_PASSWORD.hwnd(&app), EM_GETPASSWORDCHAR, 0, 0),
-                0
-            );
+            assert!(!app.by_id.contains_key(&1513),"password input removed");
             assert!(app.router_key.is_empty());
             let pending = identity::load(&root).unwrap().unwrap();
-            assert_eq!(pending["account"]["username"], "fixture-user");
+            assert_eq!(pending["account"]["identity_id"], fixture_id.as_str());
             assert_eq!(pending["session"]["csrf"], "fixture-csrf");
             assert!(app.account.bind_retry);
             app.bind_account().unwrap();
             complete(&mut app);
             assert!(!app.text(SUMMARY).contains("$19.499999"));
             assert!(app.text(BALANCE).contains("$19.499999"));
-            assert!(!app.account.visible(USERNAME.hwnd(&app)));
+            assert!(app.account.visible(USERNAME.hwnd(&app)));
             assert!(app.account.visible(IDENTITY.hwnd(&app)));
             assert_eq!(app.router_key.as_str(), "fixture-private-router-credential");
             assert!(app.account.connection_ready());
@@ -1675,8 +1414,8 @@ mod tests {
             assert!(app.router_key.is_empty());
             assert!(!app.account.bind_retry);
             assert_eq!(
-                identity::load(&root).unwrap().unwrap()["account"]["username"],
-                "fixture-user"
+                identity::load(&root).unwrap().unwrap()["account"]["identity_id"],
+                fixture_id.as_str()
             );
             app.account.me = enabled_me;
             app.update_connection_state();
@@ -1752,7 +1491,7 @@ mod tests {
             assert_eq!(app.account.copied.as_str(), "fixture-address");
             app.select_page(ACCOUNT_PAGE);
             complete(&mut app);
-            assert!(app.account.visible(CURRENT.hwnd(&app)));
+            assert!(app.account.visible(USERNAME.hwnd(&app)));
             assert!(!app.account.visible(TABLE.hwnd(&app)));
             assert!(!app.account.visible(PAY.hwnd(&app)));
             assert_eq!(app.text(PAGE_TITLE), "我的账户");
@@ -1802,18 +1541,7 @@ mod tests {
             assert!(app.account.visible(USERNAME.hwnd(&app)));
             assert!(app.router_key.is_empty());
             assert!(identity::load(&root).unwrap().is_none());
-            assert_eq!(app.text(USERNAME), "fixture-user");
-            assert_eq!(app.text(PASSWORD), "example-password");
-            app.account_action(SHOW_PASSWORD).unwrap();
-            assert_eq!(
-                SendMessageW(PASSWORD.hwnd(&app), EM_GETPASSWORDCHAR, 0, 0),
-                0
-            );
-            app.account_action(SHOW_PASSWORD).unwrap();
-            assert_ne!(
-                SendMessageW(PASSWORD.hwnd(&app), EM_GETPASSWORDCHAR, 0, 0),
-                0
-            );
+            assert_eq!(identity::identities(&root,"https://example.invalid").unwrap(),vec![fixture_id]);
             assert_eq!(app.text(CLIENT_KEY), "local-api-key-never-uploaded");
             assert!(!app.catalog_loaded);
             assert!(app.catalog.pools.is_empty());

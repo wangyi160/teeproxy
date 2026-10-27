@@ -150,7 +150,7 @@ impl VerifiedSession {
                 .is_some_and(|vs| vs.iter().any(|v| v.as_u64() == Some(1))),
             "Router routing v1 required"
         );
-        ensure!(value["user_auth_version"] == 1, "Router user request signatures v1 required");
+        ensure!(value["user_auth_version"] == 2, "Router user request signatures v2 required");
         self.boot_id = value["boot_id"].as_str().filter(|s| !s.is_empty() && s.len()<=128).ok_or_else(||anyhow::anyhow!("Router boot identity missing"))?.to_owned();
         self.routing_v1 = true;
         Ok(())

@@ -11,6 +11,16 @@ impl Signer {
     }
     pub fn public_key(&self)->String {wire::hex(self.0.public_key().as_ref())}
     pub fn user_id(&self)->String {wire::user_id(self.0.public_key().as_ref())}
+    pub fn identity_proof(&self, challenge: &serde_json::Value, origin: &str, purpose: &str) -> Result<serde_json::Value> {
+        ensure!(challenge["origin"] == origin && challenge["purpose"] == purpose && challenge["role"] == "user" && challenge["public_key"] == self.public_key(), "Identity challenge does not match this client");
+        let expires=challenge["expires"].as_u64().ok_or_else(||anyhow::anyhow!("Invalid challenge expiry"))?;
+        let now=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+        ensure!(expires>now && expires<=now+360,"Identity challenge expired");
+        let cid=challenge["id"].as_str().ok_or_else(||anyhow::anyhow!("Invalid challenge"))?;
+        let nonce=challenge["nonce"].as_str().ok_or_else(||anyhow::anyhow!("Invalid challenge"))?;
+        let message=serde_json::to_vec(&("teerouter-identity-v1",origin,purpose,"user",self.public_key(),cid,nonce,expires))?;
+        Ok(serde_json::json!({"challenge_id":cid,"signature":wire::hex(self.0.sign(&message).as_ref()),"role":"user"}))
+    }
     pub fn enrollment(&self,account: &str,device: &str)->serde_json::Value {
         let public=self.public_key();
         let message=serde_json::to_vec(&("teerouter-user-enrollment-v1",account,device,&public)).unwrap();
@@ -25,7 +35,7 @@ impl Signer {
         let nonce=wire::hex(&random);
         let timestamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs().to_string();
         let message=wire::message(boot,&self.user_id(),method,uri,headers,body,&timestamp,&nonce);
-        for (name,value) in [("x-router-user-public-key",self.public_key()),("x-router-user-timestamp",timestamp),("x-router-user-nonce",nonce),("x-router-user-signature",wire::hex(self.0.sign(&message).as_ref()))] {headers.insert(name,value.parse()?);}
+        for (name,value) in [("x-router-user-id",self.user_id()),("x-router-user-timestamp",timestamp),("x-router-user-nonce",nonce),("x-router-user-signature",wire::hex(self.0.sign(&message).as_ref()))] {headers.insert(name,value.parse()?);}
         Ok(())
     }
 }

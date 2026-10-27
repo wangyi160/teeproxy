@@ -63,10 +63,11 @@ fn allowed(method: &str, route: &str) -> bool {
     match (method, parts.as_slice()) {
         ("GET", ["info" | "me" | "finance" | "payments" | "pricing" | "inventory"]) => true,
         ("GET", ["receipts", "mine"]) => true,
+        ("POST", ["identity", "challenge" | "bind"]) => !route.contains('?'),
         ("GET", ["receipts", "records", seq]) => {
             !seq.is_empty() && seq.bytes().all(|c| c.is_ascii_digit())
         }
-        ("POST", ["login" | "register" | "logout" | "password" | "connection" | "payments"]) => {
+        ("POST", ["login" | "register" | "logout" | "connection" | "payments"]) => {
             !route.contains('?')
         }
         ("GET", ["payments", key]) | ("POST", ["payments", key, "refresh"]) => {
@@ -102,6 +103,21 @@ pub(super) fn error_message(code: &str, status: u16) -> String {
     message.into()
 }
 impl AccountClient {
+    pub async fn identity_login(&self, signer: &crate::user_auth::Signer, purpose: &str) -> std::result::Result<Value,Failure> {
+        let value=self.request("POST","identity/challenge",json!({"role":"user","public_key":signer.public_key(),"purpose":purpose}),"").await?;
+        let proof=signer.identity_proof(&value["challenge"],&self.base,purpose).map_err(|_|Failure{status:401,message:"身份验证挑战无效".into()})?;
+        let response=self.request("POST",purpose,proof,"").await;
+        if purpose=="login" && response.as_ref().is_err_and(|e|e.status==404) {
+            return Box::pin(self.identity_login(signer,"register")).await;
+        }
+        let value=response?;
+        if value["account"]["identity_id"]!=signer.user_id() || value["account"]["public_key"]!=signer.public_key() {
+            *self.session.lock().await=Session::default();
+            return Err(Failure{status:401,message:"平台返回的身份与本机密钥不匹配".into()});
+        }
+        Ok(value)
+    }
+    #[cfg(test)]
     pub fn restore(base: &str, value: &Value) -> Result<Self> {
         let mut client = Self::new(base)?;
         let cookie = value["cookie"].as_str().unwrap_or("");

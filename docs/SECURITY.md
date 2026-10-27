@@ -23,4 +23,6 @@ Login issues a separate, limited-scope Router admission credential. The desktop 
 Agent 的 `/v1/models` 仅返回标准字段 `id`、`object`、`created`、`owned_by`，相同模型 ID 去重。商户、账号池、账号、倍率、报价和缓存状态保留在客户端界面，不发给 Agent。生成响应移除 `X-Router-*`、`X-Teeproxy-*`、Cookie 和服务端实现信息，保留原始正文、SSE、usage、错误状态、请求 ID 和限流重试头。
 
 
-Router 模型请求另外要求 teeproxy 自己生成的 Ed25519 签名，覆盖正文、路由规则、请求头、时间、随机数和当前 Router 启动标识。私钥仅存储在 portable 数据目录的 `user-signing-*.dpapi`，平台只能获得公钥和签名。Router 用户身份由公钥摘要确定；仅持平台 Bearer 不能冒充此身份。退出登录保留签名凭据，换设备需恢复原签名身份，不能用重新登录静默替换它。会话与缓存继续按签名身份隔离；财务账户和历史商户限制通过独立映射保留。
+Router 模型请求另外要求 teeproxy 自己生成的 Ed25519 签名，覆盖正文、路由规则、请求头、时间、随机数和当前 Router 启动标识。私钥仅存储在 portable 数据目录的 `identities/*.dpapi`，平台只能获得公钥和签名。Router 用户身份由公钥摘要确定；仅持平台 Bearer 不能冒充此身份。退出登录保留签名凭据，换设备需恢复原签名身份，不能用重新登录静默替换它。会话与缓存继续按签名身份隔离；财务账户和历史商户限制通过独立映射保留。
+
+注册和登录不使用用户名、密码。身份由本机生成的 Ed25519 公钥确定；平台只存公钥，并用一次性、限定用途和来源的挑战验证私钥所有权。Router 从配置查找公钥，模型请求仅携带 ID 与签名元数据。

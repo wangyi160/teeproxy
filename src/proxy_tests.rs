@@ -101,7 +101,9 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                 }
                                 if parts.uri.path().starts_with("/v1/") {
                                     let h=&parts.headers;
-                                    let public=crate::request_proof::unhex(h["x-router-user-public-key"].to_str().unwrap(),32).unwrap();
+                                    let public=crate::request_proof::unhex(&crate::user_auth::fixture().public_key(),32).unwrap();
+                                    assert_eq!(h["x-router-user-id"],crate::user_auth::fixture().user_id());
+                                    assert!(!h.contains_key("x-router-user-public-key"));
                                     let signature=crate::request_proof::unhex(h["x-router-user-signature"].to_str().unwrap(),64).unwrap();
                                     assert_eq!(crate::request_proof::hex(&public),crate::user_auth::fixture().public_key());
                                     let message=crate::request_proof::message("fixture-boot",&crate::request_proof::user_id(&public),&parts.method,&parts.uri,h,&bytes,h["x-router-user-timestamp"].to_str().unwrap(),h["x-router-user-nonce"].to_str().unwrap());
@@ -114,7 +116,7 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                                 if rule.is_some() { seen.notify_one(); }
                                 if hold { gate.notified().await; }
                                 if parts.uri.path() == "/health/live" {
-                                    let health = if response_mode == "old-router" { json!({"status":"ok"}) } else { json!({"status":"ok","routing_protocol_versions":[1],"user_auth_version":1,"boot_id":"fixture-boot"}) };
+                                    let health = if response_mode == "old-router" { json!({"status":"ok"}) } else { json!({"status":"ok","routing_protocol_versions":[1],"user_auth_version":2,"boot_id":"fixture-boot"}) };
                                     return Ok(Response::new(Body::from(health.to_string())));
                                 }
                                 if response_mode == "opaque" {

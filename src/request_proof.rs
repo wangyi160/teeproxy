@@ -2,7 +2,7 @@
 use hyper::http::{HeaderMap, Method, Uri};
 use sha2::{Digest, Sha256};
 
-pub(crate) const DOMAIN: &str = "teerouter-user-request-v1";
+pub(crate) const DOMAIN: &str = "teerouter-user-request-v2";
 pub(crate) fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 pub(crate) fn unhex(value: &str, length: usize) -> Result<Vec<u8>, &'static str> {
     if value.len() != length * 2 || !value.bytes().all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v)) { return Err("invalid encoding"); }
