@@ -496,7 +496,8 @@ impl App {
         let height = client.bottom * 96 / self.dpi as i32;
         for control in &self.controls {
             let [x, y, w, h] = self
-                .payment_rect(control.id, width, height)
+                .withdrawal_rect(control.id, width, height)
+                .or_else(|| self.payment_rect(control.id, width, height))
                 .or_else(|| overview_rect(control.id, width))
                 .or_else(|| self.loading_rect(control.id, width, height))
                 .or_else(|| inventory_rect(control.id, width, height))
@@ -684,7 +685,7 @@ impl App {
             return Ok(());
         }
         match id {
-            1511..=1553 => return self.account_action(id),
+            1511..=1564 => return self.account_action(id),
             NAV_FIRST..=NAV_LAST => {
                 self.select_page((id - NAV_FIRST) as usize);
                 if self.page == PRICE_PAGE && !self.prices_loaded && !self.router_key.is_empty() {
@@ -1141,6 +1142,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
             WM_COMMAND => {
                 let id = (wp & 0xffff) as u16;
                 let notification = (wp >> 16) as u16;
+                if id == 1557 && notification == EN_CHANGE as u16 {
+                    app.withdrawal_amount_changed();return 0;
+                }
                 if id == 1512
                     && (notification == EN_CHANGE as u16 || notification == EN_KILLFOCUS as u16)
                 {
@@ -1203,7 +1207,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPAR
                         || matches!(id, tray::OPEN | tray::TOGGLE | tray::EXIT))
                     && let Err(error) = app.action(id)
                 {
-                    if (1511..=1553).contains(&id) {
+                    if (1511..=1564).contains(&id) {
                         app.account_error(&error);
                     } else {
                         app.action_failed(id, &error);

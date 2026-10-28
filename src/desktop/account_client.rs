@@ -61,7 +61,9 @@ fn allowed(method: &str, route: &str) -> bool {
             && s != ".."
     };
     match (method, parts.as_slice()) {
-        ("GET", ["info" | "me" | "finance" | "payments" | "pricing" | "inventory"]) => true,
+        ("GET", ["info" | "me" | "finance" | "payments" | "withdrawals" | "pricing" | "inventory"]) => true,
+        ("POST", ["withdrawals"]) => !route.contains('?'),
+        ("POST", ["withdrawals", key, "cancel"]) => !key.is_empty() && key.bytes().all(|b| b.is_ascii_digit()) && !route.contains('?'),
         ("GET", ["receipts", "mine"]) => true,
         ("POST", ["identity", "challenge" | "bind"]) => !route.contains('?'),
         ("GET", ["receipts", "records", seq]) => {
@@ -87,6 +89,10 @@ pub(super) fn error_message(code: &str, status: u16) -> String {
         "invalid_password" | "password_incorrect" => "当前密码错误",
         "merchant_required" | "user_required" => "请使用用户账号，商户请使用 teemerchant",
         "insufficient_balance" => "余额不足",
+        "below_withdrawal_minimum" => "金额低于最低提现门槛",
+        "withdrawal_policy_changed" => "提现规则已更新，请重新进入提现页确认手续费",
+        "withdrawal_state_conflict" => "申请状态已变化，请重新读取记录",
+        "withdrawal_not_found" => "未找到此提现申请",
         "payment_disabled" | "payments_disabled" => "充值通道尚未启用",
         "payment_amount_out_of_range" => "充值金额超出允许范围",
         "payment_order_unconfirmed" => "订单结果尚未确认，可用相同金额和网络重试查询",

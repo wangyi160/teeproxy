@@ -58,7 +58,8 @@ impl App {
         let [x, y, w, h] = match id {
             PRICE_LOADING => [260, 236, width - 312, height - 510],
             ACCOUNT_LOADING => self
-                .payment_rect(account_ui::TABLE, width, height)
+                .withdrawal_rect(account_ui::TABLE, width, height)
+                .or_else(|| self.payment_rect(account_ui::TABLE, width, height))
                 .unwrap_or([260, 320, width - 312, height - 585]),
             _ => return None,
         };

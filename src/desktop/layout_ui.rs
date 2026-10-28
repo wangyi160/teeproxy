@@ -33,7 +33,7 @@ const PAGES: [(&str, &str); 10] = [
     ("路由策略", ""),
     ("模型价格", ""),
     ("我的账户", ""),
-    ("余额与充值", ""),
+    ("充值与提现", ""),
     ("消费明细", ""),
     ("连接与验证", ""),
 ];
@@ -186,6 +186,7 @@ impl App {
     pub(super) unsafe fn update_visibility(&self) {
         for control in &self.controls {
             let visible = match control.id {
+                PAGE_DESCRIPTION => !self.text(PAGE_DESCRIPTION).is_empty(),
                 REFRESH => matches!(self.page, INVENTORY_PAGE | ROUTE_PAGE | PRICE_PAGE),
                 PAGE_LOADING => self.page_loading(),
                 ACCOUNT_LOADING => self.account_table_loading(),
@@ -388,7 +389,7 @@ impl App {
         let active = nav && (id - NAV_FIRST) as usize == self.page;
         let disabled = item.itemState & ODS_DISABLED != 0;
         let pressed = item.itemState & ODS_SELECTED != 0;
-        let primary = matches!(id, START | SAVE | SAVE_TRUST | 1515 | 1531 | 1539);
+        let primary = matches!(id, START | SAVE | SAVE_TRUST | 1515 | 1531 | 1539 | 1559);
         let color = if disabled {
             rgb(153, 163, 178)
         } else if active {

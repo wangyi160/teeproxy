@@ -6,6 +6,9 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 #[path = "payment_card.rs"]
 mod payment_card;
+#[path = "withdrawal_ui.rs"]
+mod withdrawal_ui;
+use withdrawal_ui::*;
 use payment_card::{payment_payable, unix_now};
 
 pub(super) const PLATFORM: u16 = 1511;
@@ -37,6 +40,7 @@ pub(super) enum Panel {
     #[default]
     Overview,
     Payments,
+    Withdrawals,
     Finance,
 }
 impl Panel {
@@ -56,6 +60,7 @@ impl Panel {
                     format!("payments?before={cursor}")
                 }
             }
+            Self::Withdrawals => if cursor.is_empty() { "withdrawals".into() } else { format!("withdrawals?before={cursor}") },
             Self::Finance => format!("finance?offset={offset}"),
             _ => "me".into(),
         }
@@ -72,6 +77,7 @@ enum Group {
     Member,
     Panel(Panel),
     Table,
+    Funds,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
@@ -83,6 +89,8 @@ pub(super) enum Action {
     Payment,
     CheckPayment,
     Receipt,
+    Withdrawal,
+    CancelWithdrawal,
 }
 pub(super) struct Reply {
     action: Action,
@@ -199,6 +207,7 @@ impl State {
             Some(Group::Locked) => !logged && self.panel != Panel::Overview,
             Some(Group::Member) => logged && self.panel != Panel::Overview,
             Some(Group::Panel(panel)) => logged && self.panel == *panel,
+            Some(Group::Funds) => logged && matches!(self.panel, Panel::Payments | Panel::Withdrawals),
             Some(Group::Table) => logged && self.panel.has_table(),
             _ => true,
         }
@@ -359,6 +368,7 @@ impl App {
         )?;
         self.account_group(start, Group::Panel(Panel::Finance));
         SendMessageW(AMOUNT.hwnd(self), EM_SETLIMITTEXT, 20, 0);
+        self.build_withdrawal()?;
         self.building_page = None;
         Ok(())
     }
@@ -395,6 +405,7 @@ impl App {
                 && !self.account.channels.is_empty();
             EnableWindow(PAY.hwnd(self), configured as i32);
         }
+        self.withdrawal_buttons();
         if self.account.panel == Panel::Payments {
             self.payment_buttons();
         }
@@ -406,7 +417,7 @@ impl App {
         if let Err(error) = self.refresh_local_identities() {
             self.set(FEEDBACK, &error.to_string());
         }
-        let panel = Panel::for_page(self.page);
+        let panel = if self.page == PAYMENTS_PAGE && self.account.panel == Panel::Withdrawals { Panel::Withdrawals } else { Panel::for_page(self.page) };
         if self.account.panel != panel {
             self.account.panel = panel;
             self.account.page = 0;
@@ -517,6 +528,7 @@ impl App {
             return self.submit_account(if registering {Action::Register}else{Action::Login},"POST",if registering {"register"}else{"login"}.into(),json!({}),(0,String::new()),String::new());
         }
         ensure!(self.account.logged_in(), "请先登录");
+        if self.withdrawal_action(id)? { return Ok(()); }
         let action;
         let mut method = "GET";
         let route;
@@ -631,6 +643,7 @@ impl App {
             self.show_payment(row);
             return;
         }
+        if self.account.panel == Panel::Withdrawals { self.show_withdrawal(&row); return; }
         let detail = format!(
             "流水：{}\r\n模型：{} / {}\r\n账号池：{}\r\n金额：{}",
             text(&row["seq"]),
@@ -742,6 +755,7 @@ impl App {
         self.account.rows = source.as_array().cloned().unwrap_or_default();
         let headings = match panel {
             Panel::Payments => ["", "网络", "USDT", "状态", ""],
+            Panel::Withdrawals => ["申请时间", "网络", "申请 / 到账 USDT", "状态", "编号"],
             _ => ["时间", "模型 / 账号池", "金额 USD", "状态", "流水"],
         };
         for (i, label) in headings.iter().enumerate() {
@@ -791,6 +805,7 @@ impl App {
                     },
                     text(&row["id"]),
                 ],
+                Panel::Withdrawals => vec![date(&row["created_at"]),text(&row["network_name"]),format!("{} / {}",amount(&row["amount_microusd"]),amount(&row["payout_microusd"])),withdrawal_status(row),text(&row["id"])],
                 _ => vec![
                     date(&row["created_at"]),
                     format!("{} / {}", text(&row["model"]), text(&row["pool"])),
@@ -856,6 +871,7 @@ impl App {
                 .unwrap_or(0);
             SendMessageW(NETWORK.hwnd(self), CB_SETCURSEL, index, 0);
         }
+        self.render_withdrawal();
         self.update_visibility();
         self.account_busy();
         self.busy(self.task.is_some());
@@ -888,7 +904,7 @@ impl App {
                 return;
             }
         };
-        if action == Action::Payment {
+        if matches!(action, Action::Payment | Action::Withdrawal | Action::CancelWithdrawal) {
             self.account.attempt = None;
         }
         // A page switch does not cancel a sent mutation. Complete it, but keep
@@ -896,7 +912,7 @@ impl App {
         if (reply.panel != self.account.panel || self.account.refresh_pending)
             && matches!(
                 action,
-                Action::Load | Action::Receipt | Action::Payment | Action::CheckPayment
+                Action::Load | Action::Receipt | Action::Payment | Action::CheckPayment | Action::Withdrawal | Action::CancelWithdrawal
             )
         {
             if action == Action::Load {
@@ -968,7 +984,7 @@ impl App {
                 self.account.detail = Value::Null;
                 self.account.copied = Zeroizing::new(String::new());
                 self.render_account();
-                if self.account.panel == Panel::Payments
+                if matches!(self.account.panel, Panel::Payments | Panel::Withdrawals)
                     && let Some(index) = self
                         .account
                         .rows
@@ -982,7 +998,8 @@ impl App {
                         })
                         .or_else(|| (!self.account.rows.is_empty()).then_some(0))
                 {
-                    self.show_payment(self.account.rows[index].clone());
+                    if self.account.panel==Panel::Payments { self.show_payment(self.account.rows[index].clone()); }
+                    else { self.show_withdrawal(&self.account.rows[index].clone()); }
                     let item = LVITEMW {
                         state: LVIS_SELECTED | LVIS_FOCUSED,
                         stateMask: LVIS_SELECTED | LVIS_FOCUSED,
@@ -1021,6 +1038,10 @@ impl App {
                 self.account.copied = Zeroizing::new(detail);
                 self.set(COPY, "复制凭据 JSON");
                 self.set(FEEDBACK, "凭据已读取");
+            }
+            Action::Withdrawal | Action::CancelWithdrawal => {
+                self.set(FEEDBACK, if action == Action::Withdrawal { "提现申请已提交" } else { "提现已取消，金额已退回余额" });
+                self.account.page=0;self.account.cursors=vec![String::new()];followup=true;
             }
             Action::Payment | Action::CheckPayment => {
                 self.show_payment(value);
@@ -1360,6 +1381,11 @@ mod tests {
                 }}))
                 .route("/portal/api/finance", get(|| async { Json(json!({"summary":{"requests":1,"pending":0,"today_microusd":123,"month_microusd":123},"data":[{"seq":"1","model":"fixture","pool":"fixture-pool","charge_microusd":"123"}],"journal":{"data":[{"id":"2","kind":"credit","amount":"20000000"}],"has_more":false}})) }))
                 .route("/portal/api/receipts/records/1", get(|| async { Json(json!({"proof":"signed-fixture"})) }))
+                .route("/portal/api/withdrawals",get(||async{Json(json!({"data":[{"id":"9","version":1,"state":"pending","network_name":"TRON","amount_microusd":"10000000","fee_microusd":"100000","payout_microusd":"9900000","address":"fixture-refund-address"}],"has_more":false,"can_apply":true,"balance":{"available_microusd":"9500000","reserved_microusd":"10000000"},"channels":[{"id":"tron","name":"TRON"}],"fee_policy":{"version":1,"minimum_microusd":"1000000","tiers":[{"to_microusd":null,"rate_bps":100}]}}))}))
+                .route("/portal/api/withdrawals/9/cancel",post(|headers:HeaderMap,Json(body):Json<Value>|async move{
+                    assert_eq!(headers["x-csrf-token"],"fixture-csrf");assert_eq!(body,json!({"version":1}));
+                    Json(json!({"id":"9","state":"cancelled"}))
+                }))
                 .route("/portal/api/payments",get(move || {
                     let order = payment_get.lock().unwrap().clone();
                     async move {Json(json!({"data":if order.is_null(){vec![]}else{vec![order]},"has_more":false,"config":{"enabled":true,"channels":[{"id":"tron","name":"TRON"}]}}))}
@@ -1472,7 +1498,7 @@ mod tests {
             complete(&mut app);
             assert_eq!(app.account.channels.len(), 1);
             assert!(app.account.rows.is_empty());
-            assert_eq!(app.text(PAGE_TITLE), "余额与充值");
+            assert_eq!(app.text(PAGE_TITLE), "充值与提现");
             assert!(app.account.visible(PAY.hwnd(&app)));
             let operation = app.account_operation("payment:tron:10".into()).unwrap();
             assert_eq!(
@@ -1501,6 +1527,17 @@ mod tests {
             assert_eq!(app.account.rows.len(), 1);
             assert!(app.text(DETAILS).contains("10.000123"));
             assert_eq!(app.account.copied.as_str(), "fixture-address");
+            app.account_action(WITHDRAW_TAB).unwrap();complete(&mut app);
+            assert_eq!(app.account.panel,Panel::Withdrawals);
+            assert!(!app.account.visible(PAY.hwnd(&app)));
+            assert!(app.account.visible(1559u16.hwnd(&app)));
+            assert!(app.text(1562).contains("$9.50"));
+            let selected=LVITEMW{state:LVIS_SELECTED,stateMask:LVIS_SELECTED,..mem::zeroed()};
+            SendMessageW(TABLE.hwnd(&app),LVM_SETITEMSTATE,0,(&selected as *const LVITEMW) as isize);
+            app.account_selection_changed();assert!(app.text(DETAILS).contains("9.90 USDT"));
+            app.account_action(1560).unwrap();complete(&mut app);
+            app.account_action(DEPOSIT_TAB).unwrap();complete(&mut app);
+            assert_eq!(app.account.panel,Panel::Payments);
             app.select_page(ACCOUNT_PAGE);
             complete(&mut app);
             assert!(app.account.visible(USERNAME.hwnd(&app)));
