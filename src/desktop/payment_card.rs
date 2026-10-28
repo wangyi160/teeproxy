@@ -27,10 +27,10 @@ fn cards(width: i32, height: i32) -> [[i32; 4]; 4] {
     let content = width - 280;
     let history = (content * 2 / 5).clamp(270, 380);
     [
-        [244, 128, 210, 130],
-        [470, 128, width - 506, 130],
-        [244, 278, history, height - 378],
-        [260 + history, 278, content - history - 16, height - 378],
+        [244, 186, 210, 112],
+        [470, 186, width - 506, 112],
+        [244, 318, history, height - 418],
+        [260 + history, 318, content - history - 16, height - 418],
     ]
 }
 
@@ -54,11 +54,11 @@ impl App {
         let [hx, hy, hw, hh] = history;
         let [cx, cy, cw, ch] = checkout;
         Some(match id {
-            IDENTITY => [264, 224, 170, 22],
-            BALANCE => [264, 180, 174, 30],
-            NETWORK => [form[0] + 20, 204, form[2] - 316, 250],
-            AMOUNT => [width - 292, 210, 84, 22],
-            PAY => [width - 184, 200, 128, 38],
+            IDENTITY => [260, 130, width - 312, 44],
+            BALANCE => [264, 238, 174, 30],
+            NETWORK => [form[0] + 20, 256, form[2] - 316, 250],
+            AMOUNT => [width - 292, 262, 84, 22],
+            PAY => [width - 184, 252, 128, 38],
             TABLE => [hx + 16, hy + 48, hw - 32, hh - 108],
             PAGE => [hx + 116, hy + 20, hw - 136, 20],
             PREV => [hx + 16, hy + hh - 48, (hw - 44) / 2, 32],
@@ -72,7 +72,7 @@ impl App {
     pub(in crate::desktop) fn payment_frame(&self, hwnd: HWND, width: i32) -> Option<[i32; 4]> {
         (self.payment_page() && self.by_id.get(&AMOUNT) == Some(&hwnd)).then_some([
             width - 302,
-            200,
+            252,
             104,
             40,
         ])
@@ -86,8 +86,7 @@ impl App {
         self.payment_page()
             && matches!(
                 id,
-                IDENTITY
-                    | BALANCE
+                BALANCE
                     | NETWORK
                     | AMOUNT
                     | PAY
@@ -172,10 +171,10 @@ impl App {
         };
         let ink = rgb(28, 41, 61);
         let muted = rgb(106, 119, 139);
-        label("可用余额 · USD", [264, 148, 170, 24], 2, muted);
-        label("USDT 充值", [490, 146, 160, 24], 3, ink);
-        label("支付网络", [490, 178, 160, 20], 2, muted);
-        label("充值金额", [width - 302, 178, 104, 20], 2, muted);
+        label("可用余额 · USD", [264, 206, 170, 24], 2, muted);
+        label("USDT 充值", [490, 198, 160, 24], 3, ink);
+        label("支付网络", [490, 230, 160, 20], 2, muted);
+        label("充值金额", [width - 302, 230, 104, 20], 2, muted);
         label("充值记录", [260, surfaces[2][1] + 18, 100, 24], 4, ink);
         let [x, y, w, h] = surfaces[3];
         let row = &self.account.detail;

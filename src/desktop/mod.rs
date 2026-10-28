@@ -339,7 +339,9 @@ impl App {
             id,
             w!("EDIT"),
             value,
-            WS_TABSTOP | ES_AUTOHSCROLL as u32 | extra,
+            WS_TABSTOP
+                | if extra & ES_MULTILINE as u32 == 0 { ES_AUTOHSCROLL as u32 } else { 0 }
+                | extra,
             [rect[0] + 10, rect[1] + 10, rect[2] - 20, rect[3] - 18],
             0,
         )?;
@@ -508,6 +510,7 @@ impl App {
                 0,
             );
         }
+        self.layout_identity_labels();
         self.payment_columns(width, height);
         RedrawWindow(
             self.hwnd,
@@ -525,6 +528,29 @@ impl App {
     }
     unsafe fn set(&self, id: u16, text: &str) {
         SetWindowTextW(self.by_id[&id], wide(text).as_ptr());
+    }
+    // IDs have no word boundaries. Wrap the display only; the stored ID and
+    // the selectable account field remain the original, copyable string.
+    unsafe fn set_identity_label(&self, id: u16, value: &str) {
+        let hwnd = self.by_id[&id];
+        let mut rect = RECT::default();
+        GetClientRect(hwnd, &mut rect);
+        let dc = GetDC(hwnd);
+        let saved = SelectObject(dc, SendMessageW(hwnd, WM_GETFONT, 0, 0) as HGDIOBJ);
+        let text = wide(value);
+        let mut size = SIZE::default();
+        GetTextExtentPoint32W(dc, text.as_ptr(), (text.len() - 1) as i32, &mut size);
+        SelectObject(dc, saved);
+        ReleaseDC(hwnd, dc);
+        let displayed = if size.cx > rect.right && value.chars().count() > 1 {
+            let split = value.char_indices().nth(value.chars().count().div_ceil(2)).unwrap().0;
+            format!("{}\r\n{}", &value[..split], &value[split..])
+        } else {
+            value.to_owned()
+        };
+        if self.text(id) != displayed {
+            self.set(id, &displayed);
+        }
     }
     unsafe fn status(&mut self, text: &str, color: u32) {
         self.status_color = color;

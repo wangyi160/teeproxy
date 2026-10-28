@@ -23,12 +23,14 @@ pub(super) fn overview_link(id: u16) -> bool {
 
 pub(super) fn overview_cards(width: i32) -> [[i32; 4]; 6] {
     let available = width - 280;
-    let metric = (available - 32) / 3;
+    let service = 144;
+    let balance = 160;
+    let account = available - service - balance - 32;
     let route = (available - 16) * 56 / 100;
     [
-        [244, 128, metric, 112],
-        [260 + metric, 128, metric, 112],
-        [276 + metric * 2, 128, available - 32 - metric * 2, 112],
+        [244, 128, service, 112],
+        [260 + service, 128, account, 112],
+        [276 + service + account, 128, balance, 112],
         [244, 256, available, 176],
         [244, 448, route, 240],
         [260 + route, 448, available - route - 16, 240],
@@ -41,7 +43,7 @@ pub(super) fn overview_rect(id: u16, width: i32) -> Option<[i32; 4]> {
     let link = |card: [i32; 4], w| [card[0] + card[2] - w - 12, card[1] + 12, w, 30];
     Some(match id {
         PROXY_STATE => metric(service),
-        ACCOUNT_NAME => metric(account),
+        ACCOUNT_NAME => [account[0] + 20, account[1] + 52, account[2] - 40, 48],
         BALANCE => metric(balance),
         OPEN_LOG => link(service, 52),
         OPEN_ACCOUNT => link(account, 52),
@@ -73,7 +75,7 @@ impl App {
         self.building_page = Some(OVERVIEW);
         for (id, font) in [
             (PROXY_STATE, 3),
-            (ACCOUNT_NAME, 3),
+            (ACCOUNT_NAME, 0),
             (BALANCE, 3),
             (ROUTE_OVERVIEW, 4),
             (ROUTE_TARGET, 0),
@@ -86,7 +88,12 @@ impl App {
                 id,
                 w!("STATIC"),
                 "",
-                SS_LEFT | windows_sys::Win32::System::SystemServices::SS_ENDELLIPSIS,
+                SS_LEFT
+                    | if id == ACCOUNT_NAME {
+                        0
+                    } else {
+                        windows_sys::Win32::System::SystemServices::SS_ENDELLIPSIS
+                    },
                 overview_rect(id, 1100).unwrap(),
                 font,
             )?;
@@ -134,7 +141,7 @@ impl App {
             },
         );
         let (username, balance) = self.account.overview_summary();
-        self.set(ACCOUNT_NAME, &username);
+        self.set_identity_label(ACCOUNT_NAME, &username);
         self.set(BALANCE, &balance);
         let active = self.live_proxy.as_ref().map(|proxy| proxy.routing_rules());
         let policy = active
@@ -242,7 +249,7 @@ impl App {
         for (card, title) in [
             (service, "本地代理"),
             (account, "当前账户"),
-            (balance, "可用余额 · USD"),
+            (balance, "余额 · USD"),
         ] {
             label(
                 title,

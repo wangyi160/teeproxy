@@ -197,7 +197,7 @@ impl State {
         match self.groups.get(&(hwnd as usize)) {
             Some(Group::Picker) => self.panel == Panel::Overview,
             Some(Group::Locked) => !logged && self.panel != Panel::Overview,
-            Some(Group::Member) => logged,
+            Some(Group::Member) => logged && self.panel != Panel::Overview,
             Some(Group::Panel(panel)) => logged && self.panel == *panel,
             Some(Group::Table) => logged && self.panel.has_table(),
             _ => true,
@@ -290,7 +290,7 @@ impl App {
         self.button(SWITCH,"注册新 ID",[434,278,150,40],0)?;
         self.account_group(start,Group::Picker);
         let start=self.controls.len();
-        self.add(IDENTITY, w!("STATIC"), "", SS_LEFT, [260, 134, -590, 28], 3)?;
+        self.add(IDENTITY, w!("STATIC"), "", SS_LEFT, [260, 134, -312, 44], 0)?;
 
         self.account_group(start, Group::Member);
         let start = self.controls.len();
@@ -299,10 +299,10 @@ impl App {
         self.account_group(start, Group::Locked);
         let start = self.controls.len();
         self.label("当前 ID",[268,356,132,24],0)?;
-        self.edit(SUMMARY,"",[268,390,-330,40],ES_READONLY as u32,"")?;
-        self.label("连接状态",[268,456,132,24],0)?;
-        self.add(CONNECTION_STATE,w!("STATIC"),"",SS_LEFT,[420,456,-480,26],0)?;
-        self.button(LOGOUT,"退出此 ID",[268,516,132,38],0)?;
+        self.edit(SUMMARY,"",[268,390,-330,64],(ES_READONLY | ES_MULTILINE) as u32,"")?;
+        self.label("连接状态",[268,478,132,24],0)?;
+        self.add(CONNECTION_STATE,w!("STATIC"),"",SS_LEFT,[420,478,-480,44],0)?;
+        self.button(LOGOUT,"退出此 ID",[268,540,132,38],0)?;
         self.account_group(start, Group::Panel(Panel::Overview));
         let start = self.controls.len();
         self.table(
@@ -679,7 +679,7 @@ impl App {
     }
     pub(super) unsafe fn render_account(&mut self) {
         let logged = self.account.logged_in();
-        self.set(
+        self.set_identity_label(
             IDENTITY,
             &if logged {
                 text(&self.account.me["account"]["identity_id"])
@@ -1240,6 +1240,14 @@ impl App {
     pub(super) unsafe fn account_error(&self, error: &anyhow::Error) {
         self.set(FEEDBACK, &error.to_string());
     }
+
+    pub(super) unsafe fn layout_identity_labels(&self) {
+        let (id, _) = self.account.overview_summary();
+        if self.by_id.contains_key(&IDENTITY) {
+            self.set_identity_label(IDENTITY, if self.account.logged_in() { &id } else { "" });
+        }
+        self.update_overview();
+    }
 }
 trait Handle {
     unsafe fn hwnd(self, app: &App) -> HWND;
@@ -1398,7 +1406,8 @@ mod tests {
             assert!(!app.text(SUMMARY).contains("$19.499999"));
             assert!(app.text(BALANCE).contains("$19.499999"));
             assert!(app.account.visible(USERNAME.hwnd(&app)));
-            assert!(app.account.visible(IDENTITY.hwnd(&app)));
+            assert!(!app.account.visible(IDENTITY.hwnd(&app)));
+            assert!(app.account.visible(SUMMARY.hwnd(&app)));
             assert_eq!(app.router_key.as_str(), "fixture-private-router-credential");
             assert!(app.account.connection_ready());
             assert!(!app.by_id.contains_key(&102));
