@@ -453,8 +453,7 @@ fn agent_models(models: &serde_json::Value) -> serde_json::Value {
             Some("chatgpt" | "openai") => "openai",
             Some("claude" | "anthropic") => "anthropic",
             Some("grok" | "xai") => "xai",
-            Some("workbuddy") => "workbuddy",
-            _ => "unknown",
+            _ => continue,
         };
         data.entry(id).or_insert_with(|| json!({
             "id": id, "object": "model", "created": model["created"].as_u64().unwrap_or(0), "owned_by": owner

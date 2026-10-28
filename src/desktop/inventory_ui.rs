@@ -700,9 +700,10 @@ mod tests {
                 state.select_page(initial_page);
                 let models = serde_json::json!({"data":[{"id":"chatgpt/alpha","router_provider":"openai","router_model":"alpha","router_pools":["pool-a"]},{"id":"chatgpt/beta","router_provider":"openai","router_model":"beta","router_pools":["pool-a","pool-b"]}]});
                 let mut pools = serde_json::json!({"data":[
-                    {"id":"pool-a","accounts":[{"id":"account-a","enabled":true,"available":true},{"id":"account-b","enabled":false,"available":false}]},
-                    {"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":true}]},
-                    {"id":"pool-empty","accounts":[]}
+                    {"id":"pool-a","provider":"openai","accounts":[{"id":"account-a","enabled":true,"available":true},{"id":"account-b","enabled":false,"available":false}]},
+                    {"id":"pool-b","provider":"openai","accounts":[{"id":"account-b","enabled":true,"available":true}]},
+                    {"id":"pool-empty","provider":"openai","accounts":[]},
+                    {"id":"retired-pool","provider":"workbuddy","accounts":[{"id":"retired","enabled":true,"available":true}]}
                 ]});
                 let probe = serde_json::json!({"status":"measured","latency_ms":170.25,
                     "checked_at":1792000000,"expires_at":4102444800u64});
@@ -903,7 +904,7 @@ mod tests {
                 state.replace_catalog(
                     catalog::parse(
                         &serde_json::json!({"data":[{"id":"chatgpt/beta","router_provider":"openai","router_model":"beta","router_pools":["pool-b"]}]}),
-                        &serde_json::json!({"data":[{"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":true}]}]}),
+                        &serde_json::json!({"data":[{"id":"pool-b","provider":"openai","accounts":[{"id":"account-b","enabled":true,"available":true}]}]}),
                     )
                     .unwrap(),
                 );
@@ -933,7 +934,7 @@ mod tests {
                 // without silently changing the persisted fixed-pool rule.
                 state.replace_catalog(catalog::parse(
                     &models,
-                    &serde_json::json!({"data":[{"id":"pool-b","accounts":[{"id":"account-b","enabled":true,"available":false}]}]}),
+                    &serde_json::json!({"data":[{"id":"pool-b","provider":"openai","accounts":[{"id":"account-b","enabled":true,"available":false}]}]}),
                 ).unwrap());
                 assert!(state.account_pool().is_none());
                 assert!(state.model_rows.is_empty());

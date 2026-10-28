@@ -103,14 +103,13 @@ pub(super) fn parse(value: &Value) -> Result<Book> {
         ..Default::default()
     };
     let providers = value["providers"].as_array().context("价格簿缺少提供商")?;
-    ensure!(providers.len() <= 4, "价格簿提供商过多");
+    ensure!(providers.len() <= 3, "价格簿提供商过多");
     let mut seen = std::collections::BTreeSet::new();
     for p in providers {
         let provider = match p["provider"].as_str() {
             Some("openai") => "ChatGPT",
             Some("anthropic") => "Claude",
             Some("xai") => "Grok",
-            Some("workbuddy") => continue,
             _ => anyhow::bail!("未知价格提供商"),
         };
         let source = text(&p["source"])?;

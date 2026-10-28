@@ -71,7 +71,7 @@ grok -m teeproxy
 
 ## VS Code Copilot 的自定义模型
 
-在 OpenAI 兼容提供商中将 API Base URL 设为 `http://127.0.0.1:8899/v1`，模型 ID 从 teeproxy 模型列表复制，并选择模型支持的接口。当前 Workbuddy 测试池仅支持 Chat Completions；Responses 和 Messages 需要各自兼容的官方账号池。
+在 OpenAI 兼容提供商中将 API Base URL 设为 `http://127.0.0.1:8899/v1`，模型 ID 从 teeproxy 模型列表复制，并选择模型支持的接口。仅接受 Codex、Claude Code、Grok Build，并使用与模型提供商匹配的原生接口。
 
 API key 必须填写 teeproxy 中配置的同一个值。v0.12.2 修复了 Electron 原生 fetch 携带 `Sec-Fetch-Site: none` 时被误报为 `browser_request_rejected` 的问题，无需修改 Copilot 的网络组件或关闭跨站请求限制。
 

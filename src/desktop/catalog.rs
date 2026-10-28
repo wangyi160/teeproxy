@@ -123,7 +123,6 @@ fn provider(value: &Value) -> String {
         "openai" | "chatgpt" => "ChatGPT".into(),
         "anthropic" | "claude" => "Claude".into(),
         "xai" | "grok" => "Grok".into(),
-        "workbuddy" => "Workbuddy（测试）".into(),
         _ => text(value),
     }
 }
@@ -132,7 +131,6 @@ fn model_namespace(value: &Value) -> Option<&'static str> {
         "openai" | "chatgpt" => Some("chatgpt"),
         "anthropic" | "claude" => Some("claude"),
         "xai" | "grok" => Some("grok"),
-        "workbuddy" => Some("workbuddy"),
         _ => None,
     }
 }
@@ -164,6 +162,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
     );
     let mut result = Catalog::default();
     for pool in pools {
+        if model_namespace(&pool["provider"]).is_none() { continue; }
         let name = text(&pool["id"]);
         let pool_name = match text(&pool["pool_name"]) {
             s if s.is_empty() => name.clone(),
@@ -235,6 +234,7 @@ pub(crate) fn parse(models: &Value, pools: &Value) -> Result<Catalog> {
     // A row is a (pool, model) pair. Never merge prices or capabilities across pools.
     let mut seen = BTreeSet::new();
     for model in models {
+        if !model["router_provider"].is_null() && model_namespace(&model["router_provider"]).is_none() { continue; }
         let wire_id = text(&model["id"]);
         ensure!(!wire_id.is_empty(), "模型目录缺少模型 ID");
         let memberships: BTreeSet<_> = model["router_pools"]
@@ -460,7 +460,7 @@ mod tests {
         ] {
             assert_eq!(multiplier(&value), expected);
         }
-        let catalog = parse(&json!({"data":[]}), &json!({"data":[{"id":"m_id.pool","pool_name":"pool","merchant_name":"Shop","multiplier_millionths":200000,"accounts":[{"id":"ready","enabled":true,"available":true}]}]})).unwrap();
+        let catalog = parse(&json!({"data":[]}), &json!({"data":[{"id":"m_id.pool","provider":"openai","pool_name":"pool","merchant_name":"Shop","multiplier_millionths":200000,"accounts":[{"id":"ready","enabled":true,"available":true}]}]})).unwrap();
         let row = &catalog.pools[0];
         assert_eq!(row.id, "m_id.pool");
         assert_eq!(row.name, "pool");
@@ -476,14 +476,14 @@ mod tests {
             {"id":"model-b","router_pools":["bad"]}
         ]});
         let mut pools = json!({"data":[
-            {"id":"p","account_count":99,"accounts":[
+            {"id":"p","provider":"openai","account_count":99,"accounts":[
                 {"id":"ready","provider":"openai","enabled":true,"available":true,"catalog":{"state":"fetched","visible_models":1},"proxy_latency":{"status":"failed"}},
                 {"id":"disabled","enabled":false,"available":true},
                 {"id":"expired","enabled":true,"available":false,"credential":"NEVER_DISPLAY"},
                 {"id":"unknown","enabled":true}
             ]},
-            {"id":"bad","accounts":[{"id":"unavailable","enabled":true,"available":false}]},
-            {"id":"empty","accounts":[]}
+            {"id":"bad","provider":"openai","accounts":[{"id":"unavailable","enabled":true,"available":false}]},
+            {"id":"empty","provider":"openai","accounts":[]}
         ]});
         let catalog = parse(&models, &pools).unwrap();
         assert_eq!(catalog.models.len(), 1);

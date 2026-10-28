@@ -279,7 +279,9 @@ async fn local_models_use_shared_management_cache_and_removed_routes_never_reach
             {"id":"grok/model-a","created":123,"owned_by":"private-merchant","router_provider":"xai",
                 "router_pools":["private-pool"],"router_merchants":[{"id":"private-merchant"}],
                 "router_capabilities":[{"account_id":"private-account"}],"price":{"input":10},"future_private_field":"hidden"},
-            {"id":"grok/model-a","router_pools":["another-pool"]}
+            {"id":"grok/model-a","router_pools":["another-pool"]},
+            {"id":"workbuddy/test","router_provider":"workbuddy"},
+            {"id":"unknown/test","router_provider":"unknown"}
         ]},"pools":{"data":[]}}))
     })}));
     let listener=TcpListener::bind("127.0.0.1:0").await.unwrap();
