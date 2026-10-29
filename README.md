@@ -82,7 +82,7 @@ Agent 必须填写与 teeproxy 配置完全一致的 API key，不能使用任�
 - 响应状态和数据逐块转发，支持 SSE；取消、错误或超时关闭对应上游连接。已发出的请求不会自动重放。
 - 默认监听本机回环地址；支持配置 IP 和所有网卡监听，所有地址必须使用与配置一致的 teeproxy API key。核对请求实际连接的本机 IP 和端口，拒绝浏览器跨域请求、CONNECT、代理形式的目标 URL、管理接口和 URL 凭证。
 - Router 负责 agent 与模型匹配、账号选择、倍率约束、计费和拒答审计；支持的接口返回业务错误时，teeproxy 原样转发，不重试也不因该错误停止代理。
-- 请求体及 gzip 解压后均限制为 2 MiB，默认 16 个并发请求和 128 个客户端连接。业务请求等待首个响应默认 300 秒，命令行配置项为 `response_header_timeout_secs`（1–3600 秒）；流空闲超时独立计算，默认 120 秒。等待响应超时返回 HTTP 504 / `router_response_timeout_request_not_replayed`，运行记录显示原因；已发送的请求不会自动重发。Router 和模型上游仍有各自的超时限制。
+- 模型请求体及 gzip 解压后的上限均为 512 MiB，覆盖公开 OpenAI 图片请求的 512 MB 范围；图片内容保持原样，上游仍检查自身的模型与请求限制。TEE 证据与能力查询继续使用各自的独立上限。默认 16 个并发请求和 128 个客户端连接。业务请求等待首个响应默认 300 秒，命令行配置项为 `response_header_timeout_secs`（1–3600 秒）；流空闲超时独立计算，默认 120 秒。等待响应超时返回 HTTP 504 / `router_response_timeout_request_not_replayed`，运行记录显示原因；已发送的请求不会自动重发。Router 和模型上游仍有各自的超时限制。
 
 当前传输支持 HTTP/SSE，尚不支持 WebSocket。Router 尚未实现 `/v1/responses/compact`、`/v1/messages/count_tokens` 等辅助操作，teeproxy 在本地返回 404。管理平台目录查询返回 401/403 时停止代理并关闭现有连接；超时、网络故障及 5xx 不触发停机。部署和本机信任边界见 [安全说明](docs/SECURITY.md)。
 

@@ -115,6 +115,7 @@ impl Body for ForwardBody {
 }
 
 pub struct Proxy {
+    pub(crate) body_limit: usize,
     config: Config,
     pool: Arc<SessionPool>,
     requests: Arc<Semaphore>,
@@ -149,6 +150,7 @@ impl Proxy {
             "API key must contain 16 to 256 visible ASCII characters"
         );
         Ok(Arc::new(Self {
+            body_limit: MAX_BODY,
             catalog: tokio::sync::watch::channel(crate::catalog::Cache::public(&config.management_url)?).0,
             requests: Arc::new(Semaphore::new(config.max_in_flight)),
             connections: Arc::new(Semaphore::new(config.max_connections)),
@@ -321,15 +323,18 @@ impl Proxy {
         let (parts, body) = request.into_parts();
         let data = match timeout(
             Duration::from_secs(30),
-            Limited::new(body, MAX_BODY).collect(),
+            Limited::new(body, self.body_limit).collect(),
         )
         .await
         {
             Ok(Ok(body)) => body.to_bytes(),
-            Ok(Err(_)) => return failure(413, "request_body_limit"),
+            Ok(Err(error)) if error.is::<http_body_util::LengthLimitError>() => {
+                return failure(413, "request_body_limit");
+            }
+            Ok(Err(_)) => return failure(400, "request_body_read_error"),
             Err(_) => return failure(408, "request_body_timeout"),
         };
-        let data = match decode_body(data, &parts.headers) {
+        let data = match decode_body(data, &parts.headers, self.body_limit) {
             Ok(data) => data,
             Err(code) => return failure(code, "invalid_content_encoding_or_body_limit"),
         };
@@ -605,7 +610,7 @@ fn clean_headers(headers: &HeaderMap, request: bool) -> HeaderMap {
     result
 }
 
-fn decode_body(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, u16> {
+fn decode_body(bytes: Bytes, headers: &HeaderMap, limit: usize) -> Result<Bytes, u16> {
     if headers.get_all("content-encoding").iter().count() > 1 {
         return Err(415);
     }
@@ -619,10 +624,10 @@ fn decode_body(bytes: Bytes, headers: &HeaderMap) -> Result<Bytes, u16> {
         Some("gzip") => {
             let mut output = Vec::new();
             flate2::read::MultiGzDecoder::new(bytes.as_ref())
-                .take(MAX_BODY as u64 + 1)
+                .take(limit as u64 + 1)
                 .read_to_end(&mut output)
                 .map_err(|_| 400u16)?;
-            if output.len() > MAX_BODY {
+            if output.len() > limit {
                 return Err(413);
             }
             Ok(output.into())

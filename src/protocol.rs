@@ -5,7 +5,8 @@ use subtle::ConstantTimeEq;
 
 pub const ATTESTATION_PATH: &str = "/.well-known/teellm/attestation";
 pub const MAX_EVIDENCE: usize = 512 * 1024;
-pub const MAX_BODY: usize = 2 * 1024 * 1024;
+// Model payloads include Base64 images. Evidence and capability reads have separate limits.
+pub const MAX_BODY: usize = 512 * 1024 * 1024;
 pub const SESSION_SECONDS: u64 = 120;
 
 pub fn hex(data: &[u8]) -> String {

@@ -84,7 +84,7 @@ async fn upstream(evidence_type: &'static str, response_mode: &'static str) -> U
                             let certificate = certificate.clone(); let captured = captured.clone(); let attests = attests.clone(); let gate = gate.clone(); let seen = seen.clone();
                             async move {
                                 let (parts, body) = request.into_parts();
-                                let bytes = to_bytes(Body::new(body), MAX_BODY + 1024).await.unwrap();
+                                let bytes = to_bytes(Body::new(body), 32 * 1024 * 1024).await.unwrap();
                                 if parts.uri.path() == ATTESTATION_PATH {
                                     assert!(!parts.headers.contains_key("authorization"));
                                     assert!(!parts.headers.contains_key("x-api-key"));
@@ -234,7 +234,11 @@ fn config(upstream: &Upstream) -> Config {
     config
 }
 
-async fn proxy(mut config: Config, allow_test: bool, auth: Option<&str>) -> Running {
+async fn proxy(config: Config, allow_test: bool, auth: Option<&str>) -> Running {
+    proxy_with_body_limit(config, allow_test, auth, MAX_BODY).await
+}
+
+async fn proxy_with_body_limit(mut config: Config, allow_test: bool, auth: Option<&str>, limit: usize) -> Running {
     let auth = Some(auth.unwrap_or(AGENT_KEY));
     config.client_key_env = Some("TEST_CLIENT_KEY".into());
     let listen = config.listen;
@@ -242,7 +246,8 @@ async fn proxy(mut config: Config, allow_test: bool, auth: Option<&str>) -> Runn
         allow_test_evidence: allow_test,
         ..Trust::default()
     };
-    let proxy = Proxy::new(config, trust, "router-key-not-provider-key", auth).unwrap();
+    let mut proxy = Proxy::new(config, trust, "router-key-not-provider-key", auth).unwrap();
+    Arc::get_mut(&mut proxy).unwrap().body_limit = limit;
     let listener = TcpListener::bind(listen).await.unwrap();
     let url = crate::config::local_api_url(listener.local_addr().unwrap())
         .trim_end_matches("/v1")
@@ -254,6 +259,52 @@ async fn proxy(mut config: Config, allow_test: bool, auth: Option<&str>) -> Runn
 }
 
 const AGENT_KEY: &str = "fixture-local-agent-api-key";
+
+#[tokio::test]
+async fn large_image_bodies_are_forwarded_and_signed_after_optional_gzip() {
+    use std::io::Write;
+    let upstream = upstream("teeproxy-unit-test", "json").await;
+    let gateway = proxy(config(&upstream), true, None).await;
+    // Synthetic Base64 checks payload preservation, not image decoding.
+    let body = json!({"model":"model-a","input":[{"role":"user","content":[
+        {"type":"input_image","image_url":format!("data:image/png;base64,{}", "A".repeat(17 * 1024 * 1024))}
+    ]}]}).to_string();
+    for compressed in [false, true] {
+        let mut request = agent().post(format!("{}/v1/responses", gateway.url))
+            .timeout(Duration::from_secs(60));
+        if compressed {
+            let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            gzip.write_all(body.as_bytes()).unwrap();
+            request = request.header("content-encoding", "gzip").body(gzip.finish().unwrap());
+        } else {
+            request = request.body(body.clone());
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), 201, "{}", response.text().await.unwrap());
+        response.bytes().await.unwrap();
+    }
+    let calls = upstream.calls.lock().unwrap();
+    let generated: Vec<_> = calls.iter().filter(|c| c.path == "/v1/responses").collect();
+    assert_eq!(generated.len(), 2);
+    for call in generated {
+        assert_eq!(call.body.as_ref(), body.as_bytes());
+        assert!(!call.headers.contains_key("content-encoding"));
+    }
+}
+
+#[tokio::test]
+async fn request_body_limit_accepts_exact_boundary_and_rejects_next_byte() {
+    let upstream = upstream("teeproxy-unit-test", "json").await;
+    let gateway = proxy_with_body_limit(config(&upstream), true, None, 1024).await;
+    for (size, expected) in [(1024, 201), (1025, 413)] {
+        let mut bytes = br#"{"model":"model-a","input":"hello"}"#.to_vec();
+        bytes.resize(size, b' ');
+        let response = agent().post(format!("{}/v1/responses", gateway.url)).body(bytes).send().await.unwrap();
+        assert_eq!(response.status(), expected);
+        response.bytes().await.unwrap();
+    }
+    assert_eq!(upstream.calls.lock().unwrap().iter().filter(|c| c.path == "/v1/responses").count(), 1);
+}
 
 fn agent() -> reqwest::Client { agent_with_key(Some(AGENT_KEY)) }
 fn agent_with_key(key: Option<&str>) -> reqwest::Client {
@@ -1312,8 +1363,9 @@ async fn electron_exception_does_not_allow_web_origins_navigation_or_ambiguous_m
 #[tokio::test]
 async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation() {
     use std::io::Write;
+    const LIMIT: usize = 2 * 1024 * 1024;
     let upstream = upstream("teeproxy-unit-test", "json").await;
-    let proxy = proxy(config(&upstream), true, None).await;
+    let proxy = proxy_with_body_limit(config(&upstream), true, None, LIMIT).await;
     let agent = agent();
     let url = format!("{}/v1/responses", proxy.url);
     for host in ["attacker.invalid", "127.0.0.1:1", "localhost:1"] {
@@ -1344,7 +1396,7 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
     assert_eq!(
         agent
             .post(&url)
-            .body(vec![b'x'; MAX_BODY + 1])
+            .body(vec![b'x'; LIMIT + 1])
             .send()
             .await
             .unwrap()
@@ -1352,7 +1404,7 @@ async fn host_mismatch_browser_requests_and_body_limits_fail_before_attestation(
         413
     );
     let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
-    gzip.write_all(&vec![b'x'; MAX_BODY + 1]).unwrap();
+    gzip.write_all(&vec![b'x'; LIMIT + 1]).unwrap();
     assert_eq!(
         agent
             .post(&url)
