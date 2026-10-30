@@ -1,4 +1,8 @@
+<a id="trust-and-operational-boundaries"></a>
+
 # 信任与运行边界
+
+**简体中文** | [English](SECURITY.en.md)
 
 teeproxy、agent、它们所在的用户主机及批准策略都在信任边界内。默认通过回环 HTTP 接入，也可配置本机具体 IP、`0.0.0.0` 或 `::`。所有监听地址都必须配置非空 teeproxy API key；提示词、回答和 teeproxy API key 在 Agent 到 teeproxy 这一段不使用 TLS，因此网络接入需要可信网络或受保护的通道。旧版桌面配置未指定 IP 时继续使用 `127.0.0.1`。
 
@@ -14,11 +18,11 @@ Agent 入口只接受 `GET/HEAD /v1/models` 及 `POST /v1/responses`、`POST /v1
 
 `client_key_env` 必填，API key 必须是 16–256 个可见 ASCII 字符；空配置无法启动代理。所有 Agent 接口（包括模型目录）要求请求携带与配置完全一致的 API key，缺失、空值或错误值返回 401，不查询管理平台或连接 Router。请求 Host 必须匹配接受连接的实际本机 IP 和端口；`localhost` 仅对回环目标有效，通配监听不会放宽 Host 检查。teeproxy 清理 agent 认证、Cookie 和逐跳头，再设置固定 router key。额外自定义头仍可能转发，请勿在其中放其他服务密钥。程序不会记录请求体、回答或认证值，响应强制 Cache-Control: no-store。
 
-Windows 桌面版的密钥由 DPAPI 以当前用户范围加密保存，运行时在本机内存中使用。Agent 接入中的 API key 自动加载并完整显示，只用于本机校验，不上传云端。登录后自动领取的内部 Router 连接凭据与本地 API key 独立，不作为表单字段展示；平台加密保管该内部身份用于同步，登录成功后用户名和密码加密保存在本机 login-passwords.dpapi，默认掩码显示，可由用户切换为明文；退出保留已记住的密码，修改密码成功后更新。登录会话和内部身份单独保存到便携目录的 identity.dpapi，财务记录不落盘。退出或登录失效会停止旧身份的代理、删除本地登录状态并清空私有列表，本地 API key 与监听设置保留。运行记录不包含业务内容或密钥。停止操作等待监听及已有客户端连接关闭后才允许重启。最小化或关闭窗口会隐藏到系统托盘并继续转发；在托盘菜单选择“退出 teeproxy”才会结束后台运行。托盘不可用时，关闭窗口会退出程序。
+Windows 桌面版的密钥由当前用户范围的 DPAPI 加密，运行时在本机内存中使用。Agent 接入 API key 自动加载并完整显示，只用于本地认证，不上传平台。签名私钥位于 `data/identities/`，平台只持公钥；会话和接入凭据位于 `data/identity.dpapi`。当前版本不使用用户名密码。退出或登录失效会停止旧身份的代理、清理会话与私有列表，保留本地身份和代理设置；财务记录不落盘。运行记录不含业务内容或密钥。停止时等待监听及已有客户端连接关闭，再允许重启。最小化或关闭窗口隐藏到托盘并继续转发；托盘菜单“退出 teeproxy”结束程序。托盘不可用时关闭窗口会退出。
 
 router 及云平台仍须提供匹配批准策略的启动链。TEE 证明不代表供应商实际执行了某个模型，也不等于上游零日志。项目自带空批准策略；测试与历史签名样本不构成对任何实际部署的审批或生产安全审计。
 
-Login issues a separate, limited-scope Router admission credential. The desktop client encrypts it with the remembered identity and renews it through the management session, including while minimized. Only this admission token is sent in `X-Router-Access` before attestation; business credentials remain restricted to the verified TLS session. Health negotiation uses the admission token too. CLI users supply it via `router_access_env`. It never becomes an Agent API key or an upstream header.
+登录会签发独立、范围受限的 Router 接入凭据。桌面客户端将它与会话状态一起加密保存，并通过平台会话续期，最小化时也继续执行。证明验证前仅将此接入令牌作为 `X-Router-Access` 发送；业务凭据仅进入已经验证的同一 TLS 连接。健康协商也使用接入令牌。CLI 通过 `router_access_env` 提供它；它不会成为 Agent API key 或发给上游的请求头。
 
 Agent 的 `/v1/models` 仅返回标准字段 `id`、`object`、`created`、`owned_by`，相同模型 ID 去重。商户、账号池、账号、倍率、报价和缓存状态保留在客户端界面，不发给 Agent。生成响应移除 `X-Router-*`、`X-Teeproxy-*`、Cookie 和服务端实现信息，保留原始正文、SSE、usage、错误状态、请求 ID 和限流重试头。
 

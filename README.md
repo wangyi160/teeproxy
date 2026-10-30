@@ -1,5 +1,7 @@
 # teeproxy
 
+**简体中文** | [English](README.en.md)
+
 
 给 Codex、Claude Code 等 agent 提供一个本地 API 地址。teeproxy 独立验证 [teerouter](https://github.com/wangyi160/teerouter) 的硬件证明、批准的软件发布和 TLS 绑定，通过之后才向 router 发送密钥和业务请求。
 
@@ -9,30 +11,34 @@ Agent → http://127.0.0.1:8899/v1 → teeproxy → 已验证的 TLS 1.3 → tee
 
 agent 通过 base URL 直连 teeproxy。默认入口使用回环 HTTP，无需配置本地证书或 HTTP 代理。可配置本机具体 IP、`0.0.0.0` 或 `::`；所有监听地址都必须设置非空 teeproxy API key。teeproxy 到 router 的连接始终使用 HTTPS 和独立 TEE 校验。
 
+<a id="windows-desktop-application"></a>
+
 ## Windows 桌面版
 
-Windows 版为免安装便携程序，解压后双击 `teeproxy.exe` 打开原生 Win32 窗口。配置、登录状态和 TDX/SNP 策略保存在程序同目录的 `data` 文件夹。先在“我的账户”注册或登录，程序自动绑定当前账户的 Router 身份；在“Agent 接入”设置本地 IP、端口和 API key，在“连接与验证”选择审核后的 TDX/SNP 策略。API key 只供 Agent 访问本机代理，不上传平台或 Router。
+Windows 版为免安装便携程序，解压后双击 `teeproxy.exe` 打开原生 Win32 窗口。配置、登录状态和 TDX/SNP 策略保存在程序同目录的 `data` 文件夹。先在“我的账户”注册新 ID 或选择已有本地 ID，程序自动绑定当前账户的 Router 身份；在“Agent 接入”设置本地 IP、端口和 API key，在“连接与验证”选择审核后的 TDX/SNP 策略。API key 只供 Agent 访问本机代理，不上传平台或 Router。
 
 - **保存设置**：将设置保存到 `data/desktop.json`，外部策略文件复制到 `data/policies/` 并保存相对路径；密钥仍由 Windows DPAPI 加密。
 - **验证连接**：在后台校验真实 router，显示校验结果，不发送业务密钥。
 - **启动代理 / 停止代理**：右上角按钮控制本地 API 监听；停止会同时关闭现有连接和响应流。
 - **概览**：查看本地 `/v1` 地址、上游地址及模型和账号池数量，点击“复制地址”用于 agent 的 base URL。
 - **账号池与模型**：同页展示三个联动列表：上方选择账号池，下方左侧显示池内账号，右侧显示池内模型。登录后每次进入页面自动刷新，页面可见时每 5 分钟更新，无需启动本地代理。池列表保留商户、倍率、账号数量、模型提供商和状态；账号数量只统计可用账号；停用、不可用账号及没有可用账号的池不展示，其专属模型也不进入列表。切换池会清除模型搜索条件；刷新按池 ID 保留选择，原池消失则清空详情，不自动换池。
-- **使用账号池**：浏览池、账号和模型不会修改路由。“使用所选账号池”保存选定的池；“使用此池并复制模型”同时复制模型 ID。两者都保留倍率上限，运行中保存后新请求立即生效。倍率由商户按池设置，1× 表示官方基准价，0.2× 表示其 20%。刷新前先通过 TEE 验证。
+- **使用账号池**：浏览池、账号和模型不会修改路由。“使用所选账号池”保存选定的池；“使用此池并复制模型”同时复制模型 ID。两者都保留倍率上限，运行中保存后新请求立即生效。倍率由商户按池设置，1× 表示官方基准价，0.2× 表示其 20%。目录由管理平台快照提供；真实模型连接仍须独立通过 TEE 验证。
 - **模型名称**：界面和 `/v1/models` 使用 `chatgpt/模型名`、`claude/模型名`、`grok/模型名`，例如 `grok/grok-4.7`。前缀是模型提供商；同一提供商的同一模型跨商户共享 ID。Router 校验提供商并选择账号池后，将原始模型名交给上游。
 - **路由策略**：指定一个账号池，或按 Agent 请求的模型自动匹配；两种模式均设置倍率上限。运行中可编辑并保存，保存后新请求立即采用新规则，正在进行的请求继续使用原规则。teeproxy 将规则随请求交给 router，由 router 统一选池、检查倍率。费率优先比较含缓存读写的预计费用；低延迟优先使用 Router 每 5 分钟通过账号代理探测官方入口的结果，并保留会话粘性，不发送模型测速请求。客户端不逐次拉取目录来选池，不修改模型或正文，界面显示 router 返回的实际选择。
 - **系统托盘**：最小化或关闭窗口后继续转发；点击托盘图标恢复，右键选择“退出 teeproxy”结束程序。
-- **我的账户**：原生登录、注册、当前身份、连接状态和修改密码；无需手工创建或应用 Router key。
+- **我的账户**：注册新 ID、选择本地 ID、查看当前身份与连接状态、退出；不使用用户名密码，无需手工创建或应用 Router key。
 - **充值与提现**：直接展示余额、充值表单和订单列表，进入后自动读取。选中或创建订单后，独立付款卡片展示收款二维码、网络、精确金额和有效期倒计时，付款状态自动刷新。切换到提现后，可选择 USDT 网络、填写金额与收款地址，实时查看手续费和到账金额；用户退款与商户共用最低门槛及阶梯费率，提交后由管理员人工处理，待处理申请可取消。
 - **消费明细**：调用费用与核算状态，选中一条记录即可查看该条签名凭据。
 
-平台负责账户、余额、充值与消费凭据，另外加密保管 Router 识别扣费账户所需的内部连接凭据；它与本地 API key 独立。本地保存监听地址、API key、路由规则和信任策略。退出登录会停止当前账户的代理并清空账户数据，保留本地设置。用户可使用所有启用商户的可用账号池，无需逐家申请。
+平台负责身份公钥登记、余额、充值与消费凭据，并签发受限的接入凭据。用户请求还需本机 Ed25519 私钥签名；本地 API key 只认证 Agent。监听地址、API key、路由规则和信任策略保存在本机。退出会停止当前身份的代理、清空会话与私有页面数据，保留本地 ID 和代理设置。用户可使用所有启用商户的可用账号池，无需逐家申请。
 
 Windows 发行包见 [Releases](https://github.com/wangyi160/teeproxy/releases)。桌面侧栏的模型价格页通过管理平台 `/portal/api/pricing` 查看当前可用模型的基准价，不直接查询 Router。具体操作、配置保存位置和后台行为见 [桌面版说明](docs/DESKTOP.md)。
 
 ![Windows 原生桌面概览](docs/images/windows-overview.png)
 
-[连接设置](docs/images/windows-desktop.png) · [路由策略](docs/images/windows-routing.png)。截图使用示例地址；连接并刷新后，“账号与模型”页显示当前 key 可访问的真实数据。
+[连接设置](docs/images/windows-desktop.png) · [路由策略](docs/images/windows-routing.png)。截图使用示例地址；连接并刷新后，“账号池与模型”页显示当前身份可访问的真实数据。
+
+<a id="source-builds-and-cli"></a>
 
 ## 源码构建和命令行
 
@@ -45,7 +51,7 @@ Windows 构建需要 Windows SDK（MSVC）或 MinGW 资源编译器。`cargo bui
 
 在 `teeproxy.toml` 填写 router 的 HTTPS 根地址和自己审核的 `tdx_policy` 或 `snp_policy`。相对路径以配置文件所在目录为基准。示例策略为空，启动会拒绝；策略建立方法见 [证明与策略](docs/ATTESTATION.md)。
 
-向 teeproxy 的启动环境提供内部连接凭据 `TEEPROXY_ROUTER_KEY` 和本地 API key `TEEPROXY_CLIENT_KEY`，然后执行：
+命令行模式需要已登记身份的连接凭据、受限握手 JWT、本地签名种子和 Agent API key。`router_key_env`、`router_access_env`、`user_signing_seed_env`、`client_key_env` 分别指定其环境变量名；示例中的签名种子变量为 `TEEPROXY_USER_SIGNING_SEED`，还需按部署填写 `router_access_env`。签名种子为 32 字节、64 个十六进制字符，必须对应已登记公钥，不能用随机新种子替代已有身份。通过受保护环境提供这些值，再执行：
 
 ```sh
 ./target/release/teeproxy verify --config teeproxy.toml
@@ -55,6 +61,8 @@ Windows 构建需要 Windows SDK（MSVC）或 MinGW 资源编译器。`cargo bui
 `verify` 不读取 router key，也不发送业务请求。`run` 默认监听 `127.0.0.1:8899`。每个新建 router 连接都必须通过验证；已验证连接最多在 120 秒内复用，过期重新验证，正在进行的流可继续完成。
 
 默认包含 Intel TDX/dstack 验证。AMD SEV-SNP 使用 `cargo build --release --locked --features snp-verifier`，还需要编译 vendored OpenSSL 所需的 C 工具链和 Perl。
+
+<a id="connecting-agents"></a>
 
 ## 连接 agent
 
@@ -74,6 +82,8 @@ Grok Build：将 [模型配置示例](examples/grok.config.toml) 合并到用户
 
 Agent 必须填写与 teeproxy 配置完全一致的 API key，不能使用任意占位值。这个 API key 仅用于本机校验，不转发 Router；真实 Router 连接凭据由 teeproxy 管理。完整 PowerShell 命令、认证和版本迁移见 [客户端接入](docs/CLIENTS.md)。
 
+<a id="behavior-and-scope"></a>
+
 ## 行为和范围
 
 - 入口仅开放 `GET/HEAD /v1/models` 和 `POST /v1/responses`、`POST /v1/messages`、`POST /v1/chat/completions`。未知路径在本地返回 404，已知路径使用错误方法返回 405，不建立 Router 连接。生成请求的查询参数、正文和业务头仍直接透传，不解析模型、prompt、tools、usage 或拒答字段。
@@ -85,6 +95,8 @@ Agent 必须填写与 teeproxy 配置完全一致的 API key，不能使用任�
 - 模型请求体及 gzip 解压后的上限均为 512 MiB，覆盖公开 OpenAI 图片请求的 512 MB 范围；图片内容保持原样，上游仍检查自身的模型与请求限制。TEE 证据与能力查询继续使用各自的独立上限。默认 16 个并发请求和 128 个客户端连接。业务请求等待首个响应默认 300 秒，命令行配置项为 `response_header_timeout_secs`（1–3600 秒）；流空闲超时独立计算，默认 120 秒。等待响应超时返回 HTTP 504 / `router_response_timeout_request_not_replayed`，运行记录显示原因；已发送的请求不会自动重发。Router 和模型上游仍有各自的超时限制。
 
 当前传输支持 HTTP/SSE，尚不支持 WebSocket。Router 尚未实现 `/v1/responses/compact`、`/v1/messages/count_tokens` 等辅助操作，teeproxy 在本地返回 404。管理平台目录查询返回 401/403 时停止代理并关闭现有连接；超时、网络故障及 5xx 不触发停机。部署和本机信任边界见 [安全说明](docs/SECURITY.md)。
+
+<a id="verification"></a>
 
 ## 验证
 
@@ -104,10 +116,14 @@ cargo fmt --all -- --check
 Agent 的 `/v1/models` 仅返回标准字段 `id`、`object`、`created`、`owned_by`，相同模型 ID 去重。商户、账号池、账号、倍率、报价和缓存状态保留在客户端界面，不发给 Agent。生成响应移除 `X-Router-*`、`X-Teeproxy-*`、Cookie 和服务端实现信息，保留原始正文、SSE、usage、错误状态、请求 ID 和限流重试头。
 
 
-### Client-owned Router authentication (0.19)
+<a id="client-owned-signing-identities-since-019"></a>
 
-Click **Register new ID** to generate an Ed25519 identity locally and register its public key. No username or password is required. The identity selector retains any number of local IDs under portable `data/identities/`, encrypted with Windows DPAPI. Logout preserves the key. Login proves key possession with a single-use, origin-bound challenge. Existing signing identities migrate without changing their wallet or merchant history. Back up the data directory; DPAPI protection is tied to the Windows user.
+<a id="client-owned-router-authentication-019"></a>
 
-Management synchronizes the public key with Router. Model requests carry the registered ID, timestamp, nonce and signature, without resending the public key. Every forwarded model request carries a fresh signature over the Router boot identity, user identity, HTTP method, exact path/query, timestamp, nonce, body digest and end-to-end headers, including the routing rule. The Router user ID is `u_sig_` plus SHA-256 of the public key. A platform-issued Bearer alone cannot make model requests for that identity. The local Agent API key remains a separate credential and is never sent to Router.
+### 客户端持有签名身份（0.19 起）
 
-TEE attestation and health negotiation use the narrowly scoped login JWT before any business data is sent. teeproxy requires Router signature protocol v2; there is no unsigned compatibility fallback. CLI callers supply an already enrolled local signing seed through `user_signing_seed_env`; SDK send methods also require a `Signer`.
+点击“注册新 ID”会在本机生成 Ed25519 身份并登记公钥，不需要用户名密码。身份选择器支持多个本地 ID，密钥保存在便携目录 `data/identities/` 并由 Windows DPAPI 加密。退出保留密钥；登录通过一次性、绑定来源的挑战证明持有私钥。已有签名身份迁移保持钱包与商户历史。请备份数据目录，并保留原 Windows 用户的解密环境。
+
+管理平台向 Router 同步公钥。模型请求携带已登记 ID、时间戳、随机数和签名，不重复发送公钥。每个转发请求均使用新签名，覆盖 Router 启动标识、用户身份、HTTP 方法、精确路径/查询、时间、随机数、正文摘要以及包含路由规则的端到端请求头。Router 用户 ID 为 `u_sig_` 加公钥 SHA-256。平台 Bearer 本身不能冒充该身份发起模型请求；本地 Agent API key 是独立凭据，不发给 Router。
+
+发送业务数据前，TEE 证明与健康协商使用受限的登录 JWT。teeproxy 要求 Router 签名协议 v2，没有无签名兼容回退。CLI 通过 `user_signing_seed_env` 提供已登记的本地签名种子；SDK 发送接口同样要求 `Signer`。

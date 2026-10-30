@@ -1,12 +1,18 @@
+<a id="client-integration"></a>
+
 # 客户端接入
+
+**简体中文** | [English](CLIENTS.en.md)
+
+<a id="local-endpoint"></a>
 
 ## 本地入口
 
 teeproxy 作为本机 API 网关运行。把 agent 的 API base URL 指向它，teeproxy 负责向固定 router 建立 TLS、独立验证证明并转发请求。默认使用 `http://127.0.0.1:8899`，无需生成、安装或信任本地 CA。不要把这个地址设为 HTTP_PROXY/HTTPS_PROXY。
 
-按根目录 README 填写 router 地址与批准策略，通过受保护的环境向 teeproxy 提供 `TEEPROXY_ROUTER_KEY` 和 `TEEPROXY_CLIENT_KEY` 后启动它。以下 agent 命令在另一个终端运行；agent 不需要真实 router key。
+按根目录 README 填写 Router 地址和批准策略。CLI 通过配置的环境变量取得已登记身份的连接凭据、受限握手 JWT、签名种子及本地 API key；不能只设置两个 key 就替代身份登记。以下 Agent 命令在另一个终端运行，Agent 只需要本地 API key。
 
-Windows 桌面版在“我的账户”登录后自动绑定 Router，在“Agent 接入”配置监听 IP、端口和 API key，在“连接与验证”选择信任策略，然后点击“启动代理”。概览复制的是 Codex 和 Grok Build 使用的 `/v1` 地址；Claude Code 填写不带 `/v1` 的根地址。
+Windows 桌面版在“我的账户”注册新 ID 或使用本地 ID 后自动处理 Router 身份，在“Agent 接入”配置监听 IP、端口和 API key，在“连接与验证”选择信任策略，然后点击“启动代理”。概览复制的是 Codex 和 Grok Build 使用的 `/v1` 地址；Claude Code 填写不带 `/v1` 的根地址。
 
 | 客户端 | 原生协议 | teeproxy 入口 |
 | --- | --- | --- |
@@ -69,11 +75,15 @@ grok -m teeproxy
 
 将示例值换成 teeproxy 中配置的 API key。`supports_backend_search=false` 对应本项目暂不支持上游托管搜索工具的范围；本地工具调用仍通过 Responses 传递。配置字段见 [Grok Build 官方说明](https://docs.x.ai/build/settings)。
 
+<a id="custom-models-in-vs-code-copilot"></a>
+
 ## VS Code Copilot 的自定义模型
 
-在 OpenAI 兼容提供商中将 API Base URL 设为 `http://127.0.0.1:8899/v1`，模型 ID 从 teeproxy 模型列表复制，并选择模型支持的接口。仅接受 Codex、Claude Code、Grok Build，并使用与模型提供商匹配的原生接口。
+本地入口可接受 Electron 原生 fetch 的合法请求，但这不代表任意 VS Code 自定义模型均可完成 Router 端调用。当前 Router 要求 Codex、Claude Code 或 Grok Build 的 Agent 身份与对应提供商原生接口匹配；不要把本机请求头兼容误认为通用 Copilot 接入支持。
 
 API key 必须填写 teeproxy 中配置的同一个值。v0.12.2 修复了 Electron 原生 fetch 携带 `Sec-Fetch-Site: none` 时被误报为 `browser_request_rejected` 的问题，无需修改 Copilot 的网络组件或关闭跨站请求限制。
+
+<a id="agent-api-key-authentication"></a>
 
 ## Agent API key 认证
 
@@ -87,11 +97,15 @@ client_key_env = "TEEPROXY_CLIENT_KEY"
 
 桌面版在“Agent 接入 → API key”直接填写同样格式的值，无需设置上述 teeproxy 环境变量；agent 的 API key 仍应与此值一致。保存后重启会自动显示已配置的值，无需重新填写。
 
+<a id="migrating-from-01"></a>
+
 ## 从 0.1 迁移
 
 0.2 移除了 HTTP CONNECT、本地 CA 和供应商域名映射。重新使用 `teeproxy.example.toml`，保留自己的 router 地址、key 环境变量和批准策略路径。旧的 `ca_dir`、`routes`、`proxy_token_env` 配置会被拒绝；可选认证改用 `client_key_env`，账号池改为顶层 `pool`。
 
 将此前指向 teeproxy 的 HTTP_PROXY/HTTPS_PROXY 设置撤销，并移除仅为旧 teeproxy 设置的 CODEX_CA_CERTIFICATE/NODE_EXTRA_CA_CERTS；其他代理或 CA 设置应按实际用途保留。若已有其他 HTTP 代理，确保 NO_PROXY 包含 `127.0.0.1,localhost,::1`。旧 CA 文件不再被程序读取。
+
+<a id="compatibility"></a>
 
 ## 兼容范围
 
@@ -102,6 +116,8 @@ teeproxy 仅开放 `GET/HEAD /v1/models` 和 `POST /v1/responses`、`POST /v1/me
 当前传输支持 HTTP/SSE，尚不支持 WebSocket。Router 尚未实现 `/v1/responses/compact`、`/v1/messages/count_tokens` 等辅助操作，这些路径在本地返回 404。新增操作须在 Router 实现后加入路径与方法清单；无需在 teeproxy 中实现其正文协议。
 
 `router_attestation_failed` 表示没有发送业务请求；`router_connection_failed_request_not_replayed` 表示发送阶段失败，执行结果可能未知。teeproxy 不重放请求；agent 自身仍可能重试。
+
+<a id="catalog-and-endpoint-boundaries"></a>
 
 ## 模型目录与接口边界
 

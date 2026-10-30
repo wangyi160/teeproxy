@@ -1,4 +1,8 @@
+<a id="attestation-and-local-policies"></a>
+
 # 证明与本地策略
+
+**简体中文** | [English](ATTESTATION.en.md)
 
 验证代码位于 `src/client.rs`、`src/tdx.rs` 和 `src/snp.rs`；共享线协议位于 `src/protocol.rs`。router 的证明接口为 `POST /.well-known/teellm/attestation`。
 
