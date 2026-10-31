@@ -9,7 +9,7 @@ mod payment_card;
 #[path = "withdrawal_ui.rs"]
 mod withdrawal_ui;
 use withdrawal_ui::*;
-use payment_card::{payment_payable, unix_now};
+use payment_card::{payment_payable, unix_now, validate_payment_amount};
 
 pub(super) const PLATFORM: u16 = 1511;
 const USERNAME: u16 = 1512;
@@ -575,10 +575,7 @@ impl App {
                     .context("充值网络无效")?
                     .to_owned();
                 let amount = self.text(AMOUNT).trim().to_owned();
-                ensure!(
-                    !amount.is_empty() && amount.bytes().all(|v| v.is_ascii_digit() || v == b'.'),
-                    "请填写正确的 USDT 金额"
-                );
+                validate_payment_amount(&amount, &self.account.view["config"])?;
                 operation = self.account_operation(format!("payment:{network}:{amount}"))?;
                 action = Action::Payment;
                 method = "POST";
@@ -1388,7 +1385,7 @@ mod tests {
                 }))
                 .route("/portal/api/payments",get(move || {
                     let order = payment_get.lock().unwrap().clone();
-                    async move {Json(json!({"data":if order.is_null(){vec![]}else{vec![order]},"has_more":false,"config":{"enabled":true,"channels":[{"id":"tron","name":"TRON"}]}}))}
+                    async move {Json(json!({"data":if order.is_null(){vec![]}else{vec![order]},"has_more":false,"config":{"enabled":true,"minimum_microusd":"10000000","maximum_microusd":"10000000000","channels":[{"id":"tron","name":"TRON"}]}}))}
                 }).post(move |headers:HeaderMap,Json(body):Json<Value>| {
                     let mut calls = payment_posts.lock().unwrap();
                     calls.push(headers["idempotency-key"].to_str().unwrap().to_owned());

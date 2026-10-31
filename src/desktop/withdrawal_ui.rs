@@ -17,7 +17,7 @@ pub(super) fn withdrawal_status(row:&Value)->String {
         "pending"=>"待处理","processing"=>"打款处理中","paid"=>"已打款","rejected"=>"已拒绝","cancelled"=>"已取消",_=>"—"
     }.into()
 }
-fn micro(value:&str)->Result<i128>{
+pub(super) fn micro(value:&str)->Result<i128>{
     let parts:Vec<_>=value.trim().split('.').collect();
     ensure!((1..=2).contains(&parts.len())&&!parts[0].is_empty()&&parts.iter().all(|s|s.bytes().all(|b|b.is_ascii_digit()))&&parts.get(1).is_none_or(|s|!s.is_empty()&&s.len()<=6),"金额最多保留 6 位小数");
     let whole:i128=parts[0].parse().context("金额无效")?;

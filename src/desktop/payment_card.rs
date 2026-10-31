@@ -23,6 +23,16 @@ pub(super) fn payment_payable(row: &Value, now: u64) -> bool {
         })
 }
 
+pub(super) fn validate_payment_amount(input: &str, config: &Value) -> Result<()> {
+    let value = withdrawal_ui::micro(input)?;
+    ensure!(value % 10_000 == 0, "充值金额最多保留 2 位小数");
+    let minimum = integer(&config["minimum_microusd"]).context("正在读取充值规则")?;
+    let maximum = integer(&config["maximum_microusd"]).context("正在读取充值规则")?;
+    ensure!(value >= minimum, "最低充值 {} 美元", amount(&config["minimum_microusd"]));
+    ensure!(value <= maximum, "单笔充值最高 {} 美元", amount(&config["maximum_microusd"]));
+    Ok(())
+}
+
 fn cards(width: i32, height: i32) -> [[i32; 4]; 4] {
     let content = width - 280;
     let history = (content * 2 / 5).clamp(270, 380);
@@ -174,7 +184,13 @@ impl App {
         label("可用余额 · USD", [264, 206, 170, 24], 2, muted);
         label("USDT 充值", [490, 198, 160, 24], 3, ink);
         label("支付网络", [490, 230, 160, 20], 2, muted);
-        label("充值金额", [width - 302, 230, 104, 20], 2, muted);
+        let minimum = &self.account.view["config"]["minimum_microusd"];
+        let caption = if integer(minimum).is_some() {
+            format!("充值金额 · 最低 ${}", amount(minimum))
+        } else {
+            "充值金额".into()
+        };
+        label(&caption, [width - 302, 230, 260, 20], 2, muted);
         label("充值记录", [260, surfaces[2][1] + 18, 100, 24], 4, ink);
         let [x, y, w, h] = surfaces[3];
         let row = &self.account.detail;
@@ -324,6 +340,20 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recharge_limits_follow_platform_config_before_creating_orders() {
+        let mut config = json!({"minimum_microusd":"10000000","maximum_microusd":"10000000000"});
+        for input in ["", "-10", "NaN", "1..0", "9.99", "10.001", "10000.01"] {
+            assert!(validate_payment_amount(input, &config).is_err(), "{input}");
+        }
+        for input in ["10", "10.00", "10.01", "10000"] {
+            validate_payment_amount(input, &config).unwrap();
+        }
+        config["minimum_microusd"] = json!(20_000_000);
+        assert!(validate_payment_amount("10", &config).unwrap_err().to_string().contains("20"));
+        validate_payment_amount("20", &config).unwrap();
+        assert!(validate_payment_amount("10", &Value::Null).is_err());
+    }
     #[test]
     fn expired_or_unconfirmed_order_never_exposes_a_payable_qr() {
         let mut row = json!({"state":"pending","expires_at":101,"payable_microusd":"1000010","receive_address":"0xe027c39c24499527f5fce7f2a318eb037d85c26f"});
