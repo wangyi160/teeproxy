@@ -249,7 +249,7 @@ impl App {
         for (card, title) in [
             (service, "本地代理"),
             (account, "当前账户"),
-            (balance, "余额 · USD"),
+            (balance, "可消费余额"),
         ] {
             label(
                 title,

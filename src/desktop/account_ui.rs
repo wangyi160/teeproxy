@@ -4,6 +4,7 @@ use super::*;
 use account_client::{AccountClient, Failure};
 use serde_json::{Value, json};
 use std::sync::Arc;
+use windows_sys::Win32::System::SystemServices::SS_RIGHT;
 #[path = "payment_card.rs"]
 mod payment_card;
 #[path = "withdrawal_ui.rs"]
@@ -34,6 +35,8 @@ const BALANCE: u16 = 1542;
 const GO_LOGIN: u16 = 1543;
 const CONNECTION_STATE: u16 = 1547;
 const USAGE_SUMMARY: u16 = 1548;
+const GIFT_BALANCE: u16 = 1549;
+const CASH_BALANCE: u16 = 1550;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(super) enum Panel {
@@ -55,9 +58,9 @@ impl Panel {
         match self {
             Self::Payments => {
                 if cursor.is_empty() {
-                    "payments".into()
+                    "payments?include_bonus=1".into()
                 } else {
-                    format!("payments?before={cursor}")
+                    format!("payments?include_bonus=1&before={cursor}")
                 }
             }
             Self::Withdrawals => if cursor.is_empty() { "withdrawals".into() } else { format!("withdrawals?before={cursor}") },
@@ -248,6 +251,15 @@ fn money(value: &Value) -> String {
         format!("${}", amount(value))
     }
 }
+fn balance_amounts(balance: &Value) -> [Value;3] {
+    let available=balance.get("available_microusd").cloned().unwrap_or_else(||
+        integer(&balance["ceiling_microusd"]).zip(integer(&balance["spent_microusd"]))
+            .map(|(a,b)|json!((a-b).to_string())).unwrap_or(Value::Null));
+    let gift=balance.get("promotional_microusd").cloned().unwrap_or_else(||if balance.is_null(){Value::Null}else{json!(0)});
+    let cash=balance.get("withdrawable_microusd").cloned().unwrap_or_else(||
+        integer(&available).zip(integer(&gift)).map(|(a,b)|json!((a-b).max(0).to_string())).unwrap_or(Value::Null));
+    [available,gift,cash]
+}
 fn date(value: &Value) -> String {
     let Some(seconds) = integer(value).and_then(|v| u64::try_from(v).ok()) else {
         return "—".into();
@@ -342,7 +354,9 @@ impl App {
         self.add(PAGE, w!("STATIC"), "", SS_LEFT, [-250, 184, 210, 24], 2)?;
         self.account_group(start, Group::Table);
         let start = self.controls.len();
-        self.add(BALANCE, w!("STATIC"), "", SS_LEFT, [260, 184, -590, 28], 3)?;
+        for id in [BALANCE,GIFT_BALANCE,CASH_BALANCE] {
+            self.add(id,w!("STATIC"),"",SS_RIGHT,[260,184,120,24],4)?;
+        }
         self.account_group(start, Group::Panel(Panel::Payments));
         let start = self.controls.len();
         self.add(
@@ -615,6 +629,7 @@ impl App {
                 };
                 match self.account.panel {
                     Panel::Payments => {
+                        if row["kind"]=="bonus" {self.show_payment(row);return Ok(());}
                         action = Action::CheckPayment;
                         method = "POST";
                         route = format!("payments/{}/refresh", text(&row["id"]));
@@ -656,6 +671,12 @@ impl App {
         self.account.copied = Zeroizing::new(detail);
     }
     unsafe fn show_payment(&mut self, row: Value) {
+        if row["kind"]=="bonus" {
+            self.account.payment_qr=None;
+            self.set(DETAILS,&format!("新用户赠送 · 已入账\r\n赠送金额：{}\r\n到账时间：{}\r\n仅用于模型消费，不可提现或退款。",money(&row["credit_microusd"]),date(&row["credited_at"])));
+            self.account.copied.clear();self.account.detail=row;
+            self.payment_buttons();self.update_visibility();InvalidateRect(self.hwnd,ptr::null(),0);return;
+        }
         let payable = payment_payable(&row, unix_now());
         self.account.payment_qr = if payable {
             qrcodegen::QrCode::encode_text(
@@ -688,6 +709,7 @@ impl App {
         });
         self.account.detail = row;
         self.payment_buttons();
+        self.update_visibility();
         InvalidateRect(self.hwnd, ptr::null(), 0);
     }
     pub(super) unsafe fn render_account(&mut self) {
@@ -702,21 +724,10 @@ impl App {
         );
         self.set(DETAILS, "");
         if logged {
-            let balance = &self.account.me["balance"];
-            let available = integer(&balance["ceiling_microusd"])
-                .zip(integer(&balance["spent_microusd"]))
-                .map(|(a, b)| Value::String((a - b).to_string()))
-                .unwrap_or(Value::Null);
-            self.set(
-                BALANCE,
-                &if self.payment_page() {
-                    money(&available)
-                } else {
-                    if integer(&balance["promotional_microusd"]).unwrap_or(0)>0 {
-                        format!("可用余额　{}　含赠送 {}",money(&available),money(&balance["promotional_microusd"]))
-                    }else{format!("可用余额　{}", money(&available))}
-                },
-            );
+            let [available,gift,cash]=balance_amounts(&self.account.me["balance"]);
+            self.set(BALANCE,&money(&available));
+            self.set(GIFT_BALANCE,&money(&gift));
+            self.set(CASH_BALANCE,&money(&cash));
             self.set(SUMMARY, &text(&self.account.me["account"]["identity_id"]));
 
             self.set(
@@ -745,6 +756,8 @@ impl App {
         } else {
             self.set(SUMMARY, "");
             self.set(BALANCE, "");
+            self.set(GIFT_BALANCE, "");
+            self.set(CASH_BALANCE, "");
             self.set(CONNECTION_STATE, "");
             self.set(USAGE_SUMMARY, "");
         }
@@ -756,7 +769,7 @@ impl App {
         };
         self.account.rows = source.as_array().cloned().unwrap_or_default();
         let headings = match panel {
-            Panel::Payments => ["", "网络", "USDT", "状态", ""],
+            Panel::Payments => ["", "类型 / 网络", "金额 USD", "状态", ""],
             Panel::Withdrawals => ["申请时间", "网络", "申请 / 到账 USDT", "状态", "编号"],
             _ => ["时间", "模型 / 账号池", "金额 USD", "状态", "流水"],
         };
@@ -780,6 +793,7 @@ impl App {
             .rows
             .iter()
             .map(|row| match panel {
+                Panel::Payments if row["kind"]=="bonus" => vec![date(&row["created_at"]),"新用户赠送".into(),amount(&row["credit_microusd"]),"已入账".into(),text(&row["id"])],
                 Panel::Payments => vec![
                     date(&row["created_at"]),
                     match row["network"].as_str() {
@@ -1356,7 +1370,7 @@ mod tests {
             app.account.key_id=identity::create(&root,&app.account.base).unwrap();
             let fixture_id=app.account.key_id.clone();
             let fixture_public=app.user_signer().unwrap().public_key();
-            let view = json!({"account":{"id":"fixture-account","identity_id":fixture_id,"public_key":fixture_public,"role":"user","name":"Fixture"},"balance":{"enabled":true,"ceiling_microusd":20000000,"spent_microusd":500001},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
+            let view = json!({"account":{"id":"fixture-account","identity_id":fixture_id,"public_key":fixture_public,"role":"user","name":"Fixture"},"balance":{"enabled":true,"ceiling_microusd":20000000,"spent_microusd":500001,"promotional_microusd":600000,"withdrawable_microusd":18899999},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
             let login = view.clone();
             let me = view.clone();
             let payment_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -1390,7 +1404,10 @@ mod tests {
                 }))
                 .route("/portal/api/payments",get(move || {
                     let order = payment_get.lock().unwrap().clone();
-                    async move {Json(json!({"data":if order.is_null(){vec![]}else{vec![order]},"has_more":false,"config":{"enabled":true,"minimum_microusd":"10000000","maximum_microusd":"10000000000","channels":[{"id":"tron","name":"TRON"}]}}))}
+                    async move {
+                        let gift=json!({"id":"bonus_fixture","kind":"bonus","title":"新用户赠送","state":"credited","credit_microusd":"1000000","created_at":100,"credited_at":100,"withdrawable":false});
+                        Json(json!({"data":if order.is_null(){vec![gift]}else{vec![order,gift]},"has_more":false,"config":{"enabled":true,"minimum_microusd":"10000000","maximum_microusd":"10000000000","channels":[{"id":"tron","name":"TRON"}]}}))
+                    }
                 }).post(move |headers:HeaderMap,Json(body):Json<Value>| {
                     let mut calls = payment_posts.lock().unwrap();
                     calls.push(headers["idempotency-key"].to_str().unwrap().to_owned());
@@ -1433,6 +1450,8 @@ mod tests {
             complete(&mut app);
             assert!(!app.text(SUMMARY).contains("$19.499999"));
             assert!(app.text(BALANCE).contains("$19.499999"));
+            assert_eq!(app.text(GIFT_BALANCE),"$0.60");
+            assert_eq!(app.text(CASH_BALANCE),"$18.899999");
             assert!(app.account.visible(USERNAME.hwnd(&app)));
             assert!(!app.account.visible(IDENTITY.hwnd(&app)));
             assert!(app.account.visible(SUMMARY.hwnd(&app)));
@@ -1499,7 +1518,14 @@ mod tests {
             app.select_page(PAYMENTS_PAGE);
             complete(&mut app);
             assert_eq!(app.account.channels.len(), 1);
-            assert!(app.account.rows.is_empty());
+            assert_eq!(app.account.rows.len(),1);
+            assert_eq!(app.account.detail["kind"],"bonus");
+            assert!(app.text(DETAILS).contains("不可提现或退款"));
+            assert!(app.account.payment_qr.is_none());assert!(app.account.copied.is_empty());
+            assert!(app.payment_hidden(COPY));assert!(app.payment_hidden(COPY_AMOUNT));
+            app.account_action(DETAIL).unwrap();assert!(app.account.task.is_none(),"gift records must not call order-refresh endpoints");
+            assert!(app.account.visible(GIFT_BALANCE.hwnd(&app)));
+            assert!(app.account.visible(CASH_BALANCE.hwnd(&app)));
             assert_eq!(app.text(PAGE_TITLE), "充值与提现");
             assert!(app.account.visible(PAY.hwnd(&app)));
             let operation = app.account_operation("payment:tron:10".into()).unwrap();
@@ -1526,9 +1552,10 @@ mod tests {
                 *payment_calls.lock().unwrap(),
                 vec![operation.clone(), operation]
             );
-            assert_eq!(app.account.rows.len(), 1);
+            assert_eq!(app.account.rows.len(), 2);
             assert!(app.text(DETAILS).contains("10.000123"));
             assert_eq!(app.account.copied.as_str(), "fixture-address");
+            assert!(!app.payment_hidden(COPY));assert!(!app.payment_hidden(COPY_AMOUNT));
             app.account_action(WITHDRAW_TAB).unwrap();complete(&mut app);
             assert_eq!(app.account.panel,Panel::Withdrawals);
             assert!(!app.account.visible(PAY.hwnd(&app)));
@@ -1582,6 +1609,7 @@ mod tests {
             assert!(app.account.channels.is_empty());
             assert!(app.text(SUMMARY).is_empty());
             assert!(app.text(DETAILS).is_empty());
+            assert!(app.text(GIFT_BALANCE).is_empty());assert!(app.text(CASH_BALANCE).is_empty());
             assert!(app.account.visible(USERNAME.hwnd(&app)));
             assert!(!app.account.visible(TABLE.hwnd(&app)));
             app.select_page(FINANCE_PAGE);

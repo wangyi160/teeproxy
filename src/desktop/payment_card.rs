@@ -11,7 +11,7 @@ pub(super) fn unix_now() -> u64 {
 }
 
 pub(super) fn payment_payable(row: &Value, now: u64) -> bool {
-    row["state"] == "pending"
+    row["kind"] != "bonus" && row["state"] == "pending"
         && integer(&row["expires_at"]).is_some_and(|expiry| expiry > i128::from(now))
         && integer(&row["payable_microusd"]).is_some_and(|value| value > 0)
         && row["receive_address"].as_str().is_some_and(|address| {
@@ -37,8 +37,8 @@ fn cards(width: i32, height: i32) -> [[i32; 4]; 4] {
     let content = width - 280;
     let history = (content * 2 / 5).clamp(270, 380);
     [
-        [244, 186, 210, 112],
-        [470, 186, width - 506, 112],
+        [244, 186, 320, 112],
+        [580, 186, width - 616, 112],
         [244, 318, history, height - 418],
         [260 + history, 318, content - history - 16, height - 418],
     ]
@@ -65,10 +65,12 @@ impl App {
         let [cx, cy, cw, ch] = checkout;
         Some(match id {
             IDENTITY => [260, 130, width - 312, 44],
-            BALANCE => [264, 238, 174, 30],
-            NETWORK => [form[0] + 20, 256, form[2] - 316, 250],
-            AMOUNT => [width - 292, 262, 84, 22],
-            PAY => [width - 184, 252, 128, 38],
+            BALANCE => [432, 203, 112, 24],
+            GIFT_BALANCE => [432, 235, 112, 24],
+            CASH_BALANCE => [432, 267, 112, 24],
+            NETWORK => [form[0] + 20, 256, form[2] - 280, 250],
+            AMOUNT => [width - 274, 262, 76, 22],
+            PAY => [width - 176, 252, 120, 38],
             TABLE => [hx + 16, hy + 48, hw - 32, hh - 108],
             PAGE => [hx + 116, hy + 20, hw - 136, 20],
             PREV => [hx + 16, hy + hh - 48, (hw - 44) / 2, 32],
@@ -81,15 +83,16 @@ impl App {
 
     pub(in crate::desktop) fn payment_frame(&self, hwnd: HWND, width: i32) -> Option<[i32; 4]> {
         (self.payment_page() && self.by_id.get(&AMOUNT) == Some(&hwnd)).then_some([
-            width - 302,
+            width - 284,
             252,
-            104,
+            96,
             40,
         ])
     }
 
     pub(in crate::desktop) fn payment_hidden(&self, id: u16) -> bool {
-        self.payment_page() && matches!(id, DETAILS | DETAIL)
+        self.payment_page() && (matches!(id, DETAILS | DETAIL)
+            || (self.account.detail["kind"]=="bonus" && matches!(id,COPY|COPY_AMOUNT)))
     }
 
     pub(in crate::desktop) fn payment_white_control(&self, id: u16) -> bool {
@@ -97,6 +100,8 @@ impl App {
             && matches!(
                 id,
                 BALANCE
+                    | GIFT_BALANCE
+                    | CASH_BALANCE
                     | NETWORK
                     | AMOUNT
                     | PAY
@@ -113,7 +118,7 @@ impl App {
             return;
         }
         let available = cards(width, height)[2][2] - 38;
-        let network = available / 3;
+        let network = available * 44 / 100;
         for (index, size) in [0, network, available - network - 72, 72, 0]
             .into_iter()
             .enumerate()
@@ -181,16 +186,18 @@ impl App {
         };
         let ink = rgb(28, 41, 61);
         let muted = rgb(106, 119, 139);
-        label("可用余额 · USD", [264, 206, 170, 24], 2, muted);
-        label("USDT 充值", [490, 198, 160, 24], 3, ink);
-        label("支付网络", [490, 230, 160, 20], 2, muted);
+        label("可消费余额", [264, 203, 156, 24], 2, muted);
+        label("赠送余额（不可提现）", [264, 235, 164, 24], 2, muted);
+        label("可提现余额", [264, 267, 156, 24], 2, muted);
+        label("USDT 充值", [600, 198, 160, 24], 3, ink);
+        label("支付网络", [600, 230, 160, 20], 2, muted);
         let minimum = &self.account.view["config"]["minimum_microusd"];
         let caption = if integer(minimum).is_some() {
             format!("充值金额 · 最低 ${}", amount(minimum))
         } else {
             "充值金额".into()
         };
-        label(&caption, [width - 302, 230, 260, 20], 2, muted);
+        label(&caption, [width - 284, 230, 228, 20], 2, muted);
         label("充值记录", [260, surfaces[2][1] + 18, 100, 24], 4, ink);
         let [x, y, w, h] = surfaces[3];
         let row = &self.account.detail;
@@ -198,12 +205,22 @@ impl App {
             label("付款详情", [x + 20, y + 18, w - 40, 26], 3, ink);
             draw_text(
                 dc,
-                "选择或创建充值订单",
+                "选择记录或创建充值订单",
                 self.fonts[0],
                 self.scaled_rect([x + 20, y + 76, w - 40, h - 116], width, height),
                 muted,
                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
             );
+            return;
+        }
+        if row["kind"]=="bonus" {
+            label("新用户赠送",[x+20,y+18,w-150,26],3,ink);
+            label("已入账",[x+w-100,y+20,80,24],4,rgb(28,126,85));
+            label(&format!("+{}",money(&row["credit_microusd"])),[x+20,y+72,w-40,42],1,ink);
+            label("仅用于模型消费",[x+20,y+132,w-40,26],4,ink);
+            label("不可提现或退款",[x+20,y+164,w-40,24],0,rgb(166,110,24));
+            label("到账时间",[x+20,y+218,w-40,20],2,muted);
+            label(&date(&row["credited_at"]),[x+20,y+244,w-40,26],0,ink);
             return;
         }
         let now = unix_now();

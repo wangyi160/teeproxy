@@ -41,7 +41,7 @@ impl App {
         self.button(WITHDRAW_TAB,"提现",[-156,80,100,32],0)?;
         self.account_group(start,Group::Funds);
         let start=self.controls.len();
-        self.add(W_BALANCE,w!("STATIC"),"",SS_LEFT,[260,184,-312,28],3)?;
+        self.add(W_BALANCE,w!("STATIC"),"",SS_LEFT,[260,178,-312,42],0)?;
         self.label("提现网络",[260,222,180,24],0)?;
         self.add(W_NETWORK,w!("COMBOBOX"),"",WS_TABSTOP|CBS_DROPDOWNLIST as u32|WS_VSCROLL,[260,250,204,250],0)?;
         self.label("提现金额 · USDT",[484,222,190,24],0)?;
@@ -79,7 +79,7 @@ impl App {
         let view=&self.account.view;
         let balance=&view["balance"];
         let withdrawable=balance.get("withdrawable_microusd").unwrap_or(&balance["available_microusd"]);
-        self.set(W_BALANCE,&format!("可提现 {}    赠送 {}    提现冻结 {}",money(withdrawable),money(&balance["promotional_microusd"]),money(&balance["reserved_microusd"])));
+        self.set(W_BALANCE,&format!("可提现余额 {}    提现冻结 {}\r\n赠送余额 {}（仅消费，不可提现）",money(withdrawable),money(&balance["reserved_microusd"]),money(&balance["promotional_microusd"])));
         let old=SendMessageW(W_NETWORK.hwnd(self),CB_GETCURSEL,0,0);
         SendMessageW(W_NETWORK.hwnd(self),CB_RESETCONTENT,0,0);
         for c in view["channels"].as_array().into_iter().flatten(){SendMessageW(W_NETWORK.hwnd(self),CB_ADDSTRING,0,wide(&text(&c["name"])).as_ptr() as isize);}
