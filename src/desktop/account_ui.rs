@@ -296,7 +296,7 @@ impl App {
         self.label("本地 ID",[268,190,150,24],0)?;
         self.add(USERNAME,w!("COMBOBOX"),"",WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,[268,224,-330,260],0)?;
         self.button(SUBMIT,"使用此 ID",[268,278,150,40],0)?;
-        self.button(SWITCH,"注册新 ID",[434,278,150,40],0)?;
+        self.button(SWITCH,"Google 注册",[434,278,150,40],0)?;
         self.account_group(start,Group::Picker);
         let start=self.controls.len();
         self.add(IDENTITY, w!("STATIC"), "", SS_LEFT, [260, 134, -312, 44], 0)?;
@@ -458,7 +458,9 @@ impl App {
         let panel = self.account.panel;
         let signer=self.user_signer().ok();
         self.account.task = Some(self.runtime.spawn(async move {
-            let result = if matches!(action,Action::Login|Action::Register) {
+            let result = if action==Action::Register {
+                match &signer {Some(key)=>client.google_register(key,account_client::open_google_page).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
+            } else if action==Action::Login {
                 match &signer { Some(key)=>client.identity_login(key,&route).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()}) }
             } else if action == Action::Load {
                 let mut result=client.load(&route).await;
@@ -480,6 +482,7 @@ impl App {
         }));
         self.set(FEEDBACK, "");
         self.account_busy();
+        if action==Action::Register {self.set(FEEDBACK,"请在浏览器中完成 Google 登录");}
         Ok(())
     }
     unsafe fn account_load(&mut self, page: usize, cursor: String) -> Result<()> {
@@ -709,7 +712,9 @@ impl App {
                 &if self.payment_page() {
                     money(&available)
                 } else {
-                    format!("可用余额　{}", money(&available))
+                    if integer(&balance["promotional_microusd"]).unwrap_or(0)>0 {
+                        format!("可用余额　{}　含赠送 {}",money(&available),money(&balance["promotional_microusd"]))
+                    }else{format!("可用余额　{}", money(&available))}
                 },
             );
             self.set(SUMMARY, &text(&self.account.me["account"]["identity_id"]));
@@ -1019,7 +1024,7 @@ impl App {
 
                 let _ = self.refresh_local_identities();
                 self.set(SUBMIT, "使用此 ID");
-                self.set(SWITCH, "注册新 ID");
+                self.set(SWITCH, "Google 注册");
                 if is_account_page(self.page) {
                     self.select_page(ACCOUNT_PAGE);
                 }

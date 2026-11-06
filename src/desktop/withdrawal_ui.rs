@@ -77,7 +77,9 @@ impl App {
         self.set(WITHDRAW_TAB,if self.account.panel==Panel::Withdrawals{"● 提现"}else{"提现"});
         if self.account.panel!=Panel::Withdrawals{return;}
         let view=&self.account.view;
-        self.set(W_BALANCE,&format!("可用余额 {}    提现冻结 {}",money(&view["balance"]["available_microusd"]),money(&view["balance"]["reserved_microusd"])));
+        let balance=&view["balance"];
+        let withdrawable=balance.get("withdrawable_microusd").unwrap_or(&balance["available_microusd"]);
+        self.set(W_BALANCE,&format!("可提现 {}    赠送 {}    提现冻结 {}",money(withdrawable),money(&balance["promotional_microusd"]),money(&balance["reserved_microusd"])));
         let old=SendMessageW(W_NETWORK.hwnd(self),CB_GETCURSEL,0,0);
         SendMessageW(W_NETWORK.hwnd(self),CB_RESETCONTENT,0,0);
         for c in view["channels"].as_array().into_iter().flatten(){SendMessageW(W_NETWORK.hwnd(self),CB_ADDSTRING,0,wide(&text(&c["name"])).as_ptr() as isize);}
@@ -116,7 +118,8 @@ impl App {
             let (total,fee,rate)=quote(&self.account.view["fee_policy"],&self.text(W_AMOUNT))?;
             let display=|v:i128|amount(&Value::String(v.to_string()));
             self.set(W_QUOTE,&format!("手续费 {}% · {} USDT    到账 {} USDT",rate as f64/100.0,display(fee),display(total-fee)));
-            ensure!(integer(&self.account.view["balance"]["available_microusd"]).is_some_and(|v|total<=v),"可用余额不足");
+            let balance=&self.account.view["balance"];
+            ensure!(integer(balance.get("withdrawable_microusd").unwrap_or(&balance["available_microusd"])).is_some_and(|v|total<=v),"可提现余额不足，赠送额度只可消费");
             let index=SendMessageW(W_NETWORK.hwnd(self),CB_GETCURSEL,0,0);
             let channel=self.account.view["channels"].as_array().and_then(|v|v.get(index as usize)).context("请选择提现网络")?;
             let network=channel["id"].as_str().context("请选择提现网络")?.to_owned();

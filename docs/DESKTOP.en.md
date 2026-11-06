@@ -4,7 +4,7 @@
 
 [简体中文](DESKTOP.md) | **English**
 
-**My account (我的账户)** uses a local Ed25519 identity, without a username/password. **Register new ID (注册新 ID)** generates a key and registers its public key; **Local ID (本地 ID)** and **Use this ID (使用此 ID)** select an existing identity. Keys are encrypted under `data/identities/`, with session state separately in `data/identity.dpapi`. Startup restores and validates the session. Expired sessions reauthenticate using the local key; temporary outages preserve identity and encrypted data. Explicit logout ends the session without deleting local IDs.
+**My account (我的账户)** uses a local Ed25519 identity. **Google registration (Google 注册)** generates and saves a key, opens the system browser for Google verification, then registers its public key. **Local ID (本地 ID)** and **Use this ID (使用此 ID)** select an existing identity. Keys are encrypted under `data/identities/`, with session state separately in `data/identity.dpapi`. Startup restores and validates the session. Expired sessions reauthenticate using the local key; temporary outages preserve identity and encrypted data. Explicit logout ends the session without deleting local IDs.
 
 `teeproxy.exe` uses native Win32 windows, text fields, buttons and file selectors, supporting Tab navigation and per-monitor DPI scaling. Double-click to open it; background threads handle attestation and API forwarding.
 
@@ -18,7 +18,7 @@ Windows x86_64 packages target Windows 10/11, run after extraction and require n
 - **Top-ups and withdrawals (充值与提现):** balance and top-up network/amount form above, historical orders below left and a payment card below right. The card displays an address QR code, network, exact amount and countdown, with copy actions. QR codes encode only the address and are generated locally; select the displayed network and enter the full amount when paying. Expired/paid orders hide the QR and disable copying payment information.
 - **Consumption details (消费明细):** daily/monthly spend, request and pending-accounting counts, and per-request charges. Select a record and choose **Consumption receipt (消费凭据)** to view/copy its signed JSON.
 
-Account features access the platform directly over HTTPS through native controls, without opening a browser. Entering a page loads current account data. Top-up orders refresh every 15 seconds and other pages every five minutes. A failed order creation retains its operation ID for explicit retry, without automatically repeating payment operations.
+Account features access the platform directly over HTTPS through native controls; Google verification for a new registration uses the system browser. Entering a page loads current account data. Top-up orders refresh every 15 seconds and other pages every five minutes. A failed order creation retains its operation ID for explicit retry, without automatically repeating payment operations. The one-time $1 welcome credit is for model usage only; the withdrawal balance excludes unused promotional credit.
 
 Users may access available pools of all enabled merchants without individual applications. The platform persists identities, balances, top-up orders, charges and receipts. The client maintains no local financial-record replica.
 
