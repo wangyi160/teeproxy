@@ -1,7 +1,7 @@
 //! Account forms and lists are native child controls in the main window.
 #![allow(unsafe_op_in_unsafe_fn)]
 use super::*;
-use account_client::{AccountClient, Failure};
+use account_client::{AccountClient, Failure, Registration};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use windows_sys::Win32::System::SystemServices::SS_RIGHT;
@@ -96,6 +96,7 @@ pub(super) enum Action {
     CancelWithdrawal,
 }
 pub(super) struct Reply {
+    request_id: u64,
     action: Action,
     panel: Panel,
     page: usize,
@@ -107,6 +108,8 @@ pub(super) struct State {
     client: Option<Arc<AccountClient>>,
     base: String,
     pub task: Option<JoinHandle<()>>,
+    request_id: u64,
+    registration: Option<Arc<Registration>>,
     pub panel: Panel,
     key_id: String,
     local_ids: Vec<String>,
@@ -136,6 +139,8 @@ impl Default for State {
             client: None,
             base: String::new(),
             task: None,
+            request_id: 0,
+            registration: None,
             panel: Panel::Overview,
             key_id: String::new(),
             local_ids: Vec::new(),
@@ -386,6 +391,11 @@ impl App {
         self.building_page = None;
         Ok(())
     }
+    unsafe fn registration_button(&self) {
+        let registration = self.account.registration.as_ref();
+        self.set(SWITCH, match registration { Some(r) if r.waiting() => "取消注册", Some(_) => "正在注册", None => "Google 注册" });
+        EnableWindow(SWITCH.hwnd(self), (registration.map_or(self.account.task.is_none(), |r| r.waiting())) as i32);
+    }
     unsafe fn account_busy(&self) {
         let ready = self.account.task.is_none();
         for control in &self.controls {
@@ -408,6 +418,7 @@ impl App {
                 EnableWindow(control.hwnd, (ready || !mutating) as i32);
             }
         }
+        self.registration_button();
         if ready && self.account.logged_in() {
             EnableWindow(PREV.hwnd(self), (self.account.page > 0) as i32);
             EnableWindow(
@@ -471,9 +482,13 @@ impl App {
         let method = method.to_owned();
         let panel = self.account.panel;
         let signer=self.user_signer().ok();
+        self.account.request_id += 1;
+        let request_id = self.account.request_id;
+        let registration = (action == Action::Register).then(|| Arc::new(Registration::default()));
+        self.account.registration = registration.clone();
         self.account.task = Some(self.runtime.spawn(async move {
             let result = if action==Action::Register {
-                match &signer {Some(key)=>client.google_register(key,account_client::open_google_page).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
+                match &signer {Some(key)=>client.google_register(key,registration.as_ref().unwrap(),account_client::open_google_page).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
             } else if action==Action::Login {
                 match &signer { Some(key)=>client.identity_login(key,&route).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()}) }
             } else if action == Action::Load {
@@ -486,6 +501,7 @@ impl App {
                 client.request(&method, &route, body, &operation).await
             };
             let _ = sender.send(Event::Account(Reply {
+                request_id,
                 action,
                 panel,
                 page,
@@ -529,6 +545,22 @@ impl App {
     }
     pub(super) unsafe fn account_action(&mut self, id: u16) -> Result<()> {
         if id == GO_LOGIN { self.select_page(ACCOUNT_PAGE);return Ok(()); }
+        if id == SWITCH && let Some(registration) = &self.account.registration {
+            if !registration.cancel() {
+                self.set(FEEDBACK, "正在完成注册，请稍候");
+                self.registration_button();
+                return Ok(());
+            }
+            if let Some(task) = self.account.task.take() { task.abort(); }
+            // A reply may already be queued. Never let it replace a newer attempt.
+            self.account.request_id += 1;
+            self.account.registration = None;
+            self.account.client = None;
+            self.account.clear();
+            self.render_account();
+            self.set(FEEDBACK, "已取消 Google 注册");
+            return Ok(());
+        }
         if self.account.task.is_some() && !matches!(id,COPY|COPY_AMOUNT) {return Ok(());}
         if matches!(id,SUBMIT|SWITCH) {
             let base=account_client::platform(&self.text(PLATFORM))?;
@@ -894,7 +926,9 @@ impl App {
         self.layout();
     }
     pub(super) unsafe fn account_reply(&mut self, reply: Reply) {
+        if reply.request_id != self.account.request_id { return; }
         self.account.task.take();
+        self.account.registration = None;
         self.account.refreshed = std::time::Instant::now();
         let action = reply.action;
         self.account.session = reply.session;
@@ -1245,6 +1279,7 @@ impl App {
         identity::clear(self.path.parent().unwrap())
     }
     pub(super) unsafe fn account_poll(&mut self) {
+        if self.account.registration.is_some() { self.registration_button(); }
         if self.account.logged_in()
             && self.account.task.is_none()
             && self.account.bind_retry
@@ -1628,6 +1663,49 @@ mod tests {
             server.abort();
             DestroyWindow(app.hwnd);
             std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn google_cancel_restores_controls_and_ignores_late_replies() {
+        unsafe {
+            let root=std::env::temp_dir().join(format!("teeproxy-cancel-{}",account_client::operation_id().unwrap()));
+            let mut app=App::new(root.join("desktop.json")).unwrap();
+            InitCommonControlsEx(&INITCOMMONCONTROLSEX {dwSize:mem::size_of::<INITCOMMONCONTROLSEX>() as u32,dwICC:ICC_STANDARD_CLASSES|ICC_LISTVIEW_CLASSES});
+            app.hwnd=CreateWindowExW(0,w!("STATIC"),w!("registration cancellation"),WS_OVERLAPPEDWINDOW,0,0,1100,800,
+                ptr::null_mut(),ptr::null_mut(),GetModuleHandleW(ptr::null()),ptr::null());
+            assert!(!app.hwnd.is_null());
+            app.build_shell(&Profile::default(),&Secrets::default()).unwrap();
+            app.select_page(ACCOUNT_PAGE);
+            app.account.base="https://example.invalid".into();app.set(PLATFORM,&app.account.base);
+            app.account.key_id=identity::create(&root,&app.account.base).unwrap();
+            let key_path=root.join("identities").join(format!("{}.dpapi",app.account.key_id));
+            let original=std::fs::read(&key_path).unwrap();
+            app.refresh_local_identities().unwrap();
+            let registration=Arc::new(Registration::default());
+            app.account.registration=Some(registration.clone());app.account.request_id=1;
+            app.account.task=Some(app.runtime.spawn(std::future::pending()));
+            app.account_busy();
+            assert_eq!(app.text(SWITCH),"取消注册");
+            assert_ne!(IsWindowEnabled(SWITCH.hwnd(&app)),0);
+            assert_eq!(IsWindowEnabled(SUBMIT.hwnd(&app)),0);
+            app.account_action(SWITCH).unwrap();
+            assert!(!registration.waiting());assert!(app.account.task.is_none());
+            assert!(app.account.registration.is_none());assert!(app.account.client.is_none());
+            assert_eq!(app.text(SWITCH),"Google 注册");assert_eq!(app.text(FEEDBACK),"已取消 Google 注册");
+            assert_ne!(IsWindowEnabled(SUBMIT.hwnd(&app)),0);
+            assert_eq!(std::fs::read(&key_path).unwrap(),original,"cancellation must preserve the local signing key");
+            let next=Arc::new(Registration::default());
+            app.account.registration=Some(next.clone());app.account.request_id+=1;
+            app.account.task=Some(app.runtime.spawn(std::future::pending()));
+            app.account_busy();
+            app.account_reply(Reply {request_id:1,action:Action::Register,panel:Panel::Overview,page:0,cursor:String::new(),
+                result:Ok(json!({"account":{"role":"user","identity_id":app.account.key_id}})),session:Zeroizing::new(vec![1])});
+            assert!(app.account.task.is_some(),"a stale reply must not clear the new task");
+            assert!(Arc::ptr_eq(app.account.registration.as_ref().unwrap(),&next));
+            assert!(!app.account.logged_in());assert!(app.account.session.is_empty());
+            assert!(identity::load(&root).unwrap().is_none());
+            app.account_action(SWITCH).unwrap();
+            DestroyWindow(app.hwnd);std::fs::remove_dir_all(root).unwrap();
         }
     }
     #[test]

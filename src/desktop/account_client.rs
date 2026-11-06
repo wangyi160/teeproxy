@@ -2,6 +2,7 @@
 use anyhow::{Result, ensure};
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::Mutex;
 use zeroize::Zeroizing;
 
@@ -18,6 +19,24 @@ pub(super) struct AccountClient {
 pub(super) struct Failure {
     pub status: u16,
     pub message: String,
+}
+// Cancellation and the final signed registration request are mutually exclusive.
+// Once that request is sent, its result must be handled rather than called cancelled.
+#[derive(Default)]
+pub(super) struct Registration(AtomicU8);
+impl Registration {
+    pub fn waiting(&self) -> bool { self.0.load(Ordering::SeqCst) == 0 }
+    pub fn cancel(&self) -> bool {
+        self.0.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+    }
+    fn cancelled() -> Failure { Failure { status: 0, message: "已取消 Google 注册".into() } }
+    fn check(&self) -> std::result::Result<(), Failure> {
+        if self.waiting() { Ok(()) } else { Err(Self::cancelled()) }
+    }
+    fn finish(&self) -> std::result::Result<(), Failure> {
+        self.0.compare_exchange(0, 2, Ordering::SeqCst, Ordering::SeqCst)
+            .map(|_| ()).map_err(|_| Self::cancelled())
+    }
 }
 impl Failure {
     fn network() -> Self {
@@ -131,13 +150,15 @@ pub(super) fn error_message(code: &str, status: u16) -> String {
     message.into()
 }
 impl AccountClient {
-    pub async fn google_register(&self, signer: &crate::user_auth::Signer, open: impl Fn(&str) -> std::result::Result<(),Failure>) -> std::result::Result<Value,Failure> {
+    pub async fn google_register(&self, signer: &crate::user_auth::Signer, registration: &Registration, open: impl Fn(&str) -> std::result::Result<(),Failure>) -> std::result::Result<Value,Failure> {
+        registration.check()?;
         // A lost registration response must not send the same identity through OAuth again.
         match self.identity_login(signer,"login").await {
-            Ok(value)=>return Ok(value),
+            Ok(value)=>{registration.finish()?;return Ok(value);},
             Err(error) if error.status==404=>{},
             Err(error)=>return Err(error),
         }
+        registration.check()?;
         let challenge=self.request("POST","identity/challenge",json!({"role":"user","public_key":signer.public_key(),"purpose":"register"}),"").await?;
         let proof=signer.identity_proof(&challenge["challenge"],&self.base,"register").map_err(|_|Failure{status:401,message:"身份验证挑战无效".into()})?;
         let flow=self.request("POST","identity/google/start",proof,"").await?;
@@ -148,9 +169,11 @@ impl AccountClient {
         let flow_id=flow["flow_id"].as_str().ok_or_else(Failure::network)?.to_owned();
         let poll=Zeroizing::new(flow["poll_token"].as_str().ok_or_else(Failure::network)?.to_owned());
         if poll.len()!=64 || !poll.bytes().all(|b|b.is_ascii_hexdigit()) || !flow_id.starts_with("gf_") || flow_id.len()!=35 {return Err(Failure::network());}
+        registration.check()?;
         open(url)?;
         let deadline=tokio::time::Instant::now()+std::time::Duration::from_secs(600);
         loop {
+            registration.check()?;
             if tokio::time::Instant::now()>=deadline {return Err(Failure{status:408,message:"Google 登录超时，请重试".into()});}
             let status=self.request("POST","identity/google/status",json!({"flow_id":flow_id,"poll_token":poll.as_str()}),"").await?;
             match status["state"].as_str() {
@@ -163,6 +186,7 @@ impl AccountClient {
         let challenge=self.request("POST","identity/challenge",json!({"role":"user","public_key":signer.public_key(),"purpose":"register"}),"").await?;
         let mut proof=signer.identity_proof(&challenge["challenge"],&self.base,"register").map_err(|_|Failure{status:401,message:"身份验证挑战无效".into()})?;
         proof["google_flow_id"]=json!(flow_id);proof["google_poll_token"]=json!(poll.as_str());
+        registration.finish()?;
         let value=self.request("POST","register",proof,"").await?;
         self.check_identity(signer,value).await
     }
@@ -373,6 +397,10 @@ mod tests {
         let signer=crate::user_auth::fixture();
         let account=json!({"identity_id":signer.user_id(),"public_key":signer.public_key(),"role":"user"});
         let registered=Arc::new(AtomicBool::new(false));
+        let delay_status=Arc::new(AtomicBool::new(true));
+        let status_started=Arc::new(tokio::sync::Notify::new());
+        let status_release=Arc::new(tokio::sync::Notify::new());
+        let delayed=delay_status.clone();let started=status_started.clone();let release=status_release.clone();
         let registered_login=registered.clone();let registered_save=registered.clone();
         let login_account=account.clone();let public=signer.public_key();let origin=base.clone();let auth_origin=base.clone();
         let mock=Router::new()
@@ -389,8 +417,12 @@ mod tests {
                 assert_eq!(v["signature"].as_str().unwrap().len(),128);
                 Json(json!({"flow_id":format!("gf_{}","a".repeat(32)),"poll_token":"b".repeat(64),"authorization_url":origin+"/portal/oauth/google/start?state=test"}))
             }}))
-            .route("/portal/api/identity/google/status",post(|Json(v):Json<Value>|async move{
-                assert_eq!(v["poll_token"],"b".repeat(64));Json(json!({"state":"verified"}))
+            .route("/portal/api/identity/google/status",post(move|Json(v):Json<Value>|{
+                let delayed=delayed.clone();let started=started.clone();let release=release.clone();async move{
+                    assert_eq!(v["poll_token"],"b".repeat(64));
+                    if delayed.load(Ordering::SeqCst) {started.notify_one();release.notified().await;}
+                    Json(json!({"state":"verified"}))
+                }
             }))
             .route("/portal/api/register",post(move|headers:HeaderMap,Json(v):Json<Value>|{let registered=registered_save.clone();let account=account.clone();async move{
                 assert!(headers.get("cookie").is_none());assert_eq!(v["google_flow_id"],format!("gf_{}","a".repeat(32)));
@@ -401,10 +433,24 @@ mod tests {
         let server=tokio::spawn(async{axum::serve(listener,mock).await.unwrap()});
         let client=AccountClient::test_client(base.clone());let opened=AtomicUsize::new(0);
         let open=|url:&str|{assert!(url.starts_with(&(base.clone()+"/portal/oauth/google/start?")));opened.fetch_add(1,Ordering::SeqCst);Ok(())};
-        assert!(client.google_register(&signer,&open).await.is_ok());
+        let cancelled=Registration::default();
+        let (result,())=tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            tokio::join!(client.google_register(&signer,&cancelled,&open),async {
+                status_started.notified().await;
+                assert!(cancelled.cancel());
+                status_release.notify_one(); // Successful authorization arrives after cancellation.
+            })
+        }).await.unwrap();
+        assert!(result.is_err_and(|error|error.message=="已取消 Google 注册"));
+        assert!(!registered.load(Ordering::SeqCst),"a late OAuth result must not register or award credit");
+        assert!(client.session.lock().await.cookie.is_empty());
+        delay_status.store(false,Ordering::SeqCst);
+        let finalizing=Registration::default();
+        assert!(client.google_register(&signer,&finalizing,&open).await.is_ok());
+        assert!(!finalizing.cancel(),"an already submitted registration cannot be reported cancelled");
         assert_eq!(client.session.lock().await.cookie.as_str(),"teerouter_portal=registered");
-        assert!(client.google_register(&signer,&open).await.is_ok());
-        assert_eq!(opened.load(Ordering::SeqCst),1);
+        assert!(client.google_register(&signer,&Registration::default(),&open).await.is_ok());
+        assert_eq!(opened.load(Ordering::SeqCst),2);
         server.abort();
     }
     #[test]
