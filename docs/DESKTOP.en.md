@@ -6,6 +6,8 @@
 
 **My account (我的账户)** uses a local Ed25519 identity. **Ordinary registration (普通注册)** creates a user without promotional credit. **Google registration (Google 注册 · 赠 $1)** grants $1 after verification, once per Google account, for model usage only and never for withdrawal or refund. The policy appears below the buttons. Registration keys stay in memory and are saved under `data/identities/` only after confirmed success. Session state is saved separately in `data/identity.dpapi`. **Local ID (本地 ID)** and **Use this ID (使用此 ID)** select an existing account. Startup restores and validates sessions; temporary outages preserve registered identities. Logout does not delete registered IDs.
 
+Google-registered accounts show their verified Google email alongside the ID in the local picker, current account and overview. Long IDs wrap. Email is display metadata; authentication keeps the original ID and signing key. Older accounts can use **Add Google email (补充 Google 邮箱)** with their original Google account, without creating another identity or receiving another reward. The email is cached in the encrypted portable identity file and survives logout and restart.
+
 `teeproxy.exe` uses native Win32 windows, text fields, buttons and file selectors, supporting Tab navigation and per-monitor DPI scaling. Double-click to open it; background threads handle attestation and API forwarding.
 
 Windows x86_64 packages target Windows 10/11, run after extraction and require no administrator privileges. The two-column layout has navigation on the left and details on the right, with TDX/SNP verification, model/pool lists and a system tray.

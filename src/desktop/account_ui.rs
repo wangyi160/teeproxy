@@ -39,6 +39,7 @@ const GIFT_BALANCE: u16 = 1549;
 const CASH_BALANCE: u16 = 1550;
 const REGISTER_PLAIN: u16 = 1551;
 const REGISTRATION_POLICY: u16 = 1552;
+const GOOGLE_EMAIL: u16 = 1553;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(super) enum Panel {
@@ -83,6 +84,7 @@ enum Group {
     Panel(Panel),
     Table,
     Funds,
+    GoogleEmail,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
@@ -90,6 +92,7 @@ pub(super) enum Action {
     Login,
     Register,
     RegisterPlain,
+    GoogleEmail,
     Logout,
     Bind,
     Payment,
@@ -190,7 +193,7 @@ impl State {
             .zip(integer(&balance["spent_microusd"]))
             .map(|(ceiling, spent)| Value::String((ceiling - spent).to_string()))
             .unwrap_or(Value::Null);
-        (text(&self.me["account"]["identity_id"]), money(&available))
+        (identity::display(&self.me["account"]), money(&available))
     }
     pub fn table_loading(&self) -> bool {
         self.logged_in() && self.panel.has_table() && self.rows.is_empty() && self.task.is_some()
@@ -218,6 +221,7 @@ impl State {
         let logged = self.logged_in();
         match self.groups.get(&(hwnd as usize)) {
             Some(Group::Picker) => self.panel == Panel::Overview,
+            Some(Group::GoogleEmail) => logged && self.panel==Panel::Overview && self.me["account"]["google_registered"]==true && identity::google_email(&self.me["account"]).is_none(),
             Some(Group::Locked) => !logged && self.panel != Panel::Overview,
             Some(Group::Member) => logged && self.panel != Panel::Overview,
             Some(Group::Panel(panel)) => logged && self.panel == *panel,
@@ -299,7 +303,12 @@ impl App {
     pub(super) unsafe fn refresh_local_identities(&mut self) -> Result<()> {
         self.account.local_ids=identity::identities(self.path.parent().unwrap(),&account_client::platform(&self.text(PLATFORM))?)?;
         SendMessageW(USERNAME.hwnd(self),CB_RESETCONTENT,0,0);
-        for id in &self.account.local_ids { SendMessageW(USERNAME.hwnd(self),CB_ADDSTRING,0,wide(id).as_ptr() as isize); }
+        let base=account_client::platform(&self.text(PLATFORM))?;
+        for id in &self.account.local_ids {
+            let label=identity::picker_label(self.path.parent().unwrap(),&base,id)?;
+            SendMessageW(USERNAME.hwnd(self),CB_ADDSTRING,0,wide(&label).as_ptr() as isize);
+        }
+        SendMessageW(USERNAME.hwnd(self),CB_SETDROPPEDWIDTH,1000,0);
         let selected=self.account.local_ids.iter().position(|id|id==&self.account.key_id).unwrap_or(0);
         SendMessageW(USERNAME.hwnd(self),CB_SETCURSEL,selected,0);
         Ok(())
@@ -338,6 +347,9 @@ impl App {
         self.add(CONNECTION_STATE,w!("STATIC"),"",SS_LEFT,[420,526,-480,44],0)?;
         self.button(LOGOUT,"退出此 ID",[268,584,132,38],0)?;
         self.account_group(start, Group::Panel(Panel::Overview));
+        let start=self.controls.len();
+        self.button(GOOGLE_EMAIL,"补充 Google 邮箱",[420,584,192,38],0)?;
+        self.account_group(start,Group::GoogleEmail);
         let start = self.controls.len();
         self.table(
             TABLE,
@@ -401,8 +413,12 @@ impl App {
     }
     unsafe fn registration_button(&self) {
         let registration = self.account.registration.as_ref();
-        self.set(SWITCH, match registration { Some(r) if r.waiting() => "取消注册", Some(_) => "正在注册", None => "Google 注册 · 赠 $1" });
-        EnableWindow(SWITCH.hwnd(self), (registration.map_or(self.account.task.is_none(), |r| r.waiting())) as i32);
+        let profile=self.account.logged_in();
+        let registering=registration.filter(|_|!profile);
+        self.set(SWITCH, match registering { Some(r) if r.waiting() => "取消注册", Some(_) => "正在注册", None => "Google 注册 · 赠 $1" });
+        EnableWindow(SWITCH.hwnd(self), (registering.map_or(self.account.task.is_none(), |r| r.waiting())) as i32);
+        self.set(GOOGLE_EMAIL,match registration.filter(|_|profile){Some(r) if r.waiting()=>"取消验证",Some(_)=>"正在保存",None=>"补充 Google 邮箱"});
+        EnableWindow(GOOGLE_EMAIL.hwnd(self), (registration.filter(|_|profile).map_or(self.account.task.is_none(),|r|r.waiting())) as i32);
     }
     unsafe fn account_busy(&self) {
         let ready = self.account.task.is_none();
@@ -415,6 +431,7 @@ impl App {
                         | SUBMIT
                         | SWITCH
                         | REGISTER_PLAIN
+                        | GOOGLE_EMAIL
                         | LOGOUT
                         | NETWORK
                         | AMOUNT
@@ -496,11 +513,13 @@ impl App {
         let base=self.account.base.clone();
         self.account.request_id += 1;
         let request_id = self.account.request_id;
-        let registration = (action == Action::Register).then(|| Arc::new(Registration::default()));
+        let registration = matches!(action,Action::Register|Action::GoogleEmail).then(|| Arc::new(Registration::default()));
         self.account.registration = registration.clone();
         self.account.task = Some(self.runtime.spawn(async move {
             let result = if action==Action::Register {
                 match &signer {Some(key)=>client.google_register(key,registration.as_ref().unwrap(),account_client::open_google_page).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
+            } else if action==Action::GoogleEmail {
+                match &signer {Some(key)=>client.google_email(key,registration.as_ref().unwrap(),account_client::open_google_page).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
             } else if action==Action::RegisterPlain {
                 match &signer {Some(key)=>client.plain_register(key).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
             } else if action==Action::Login {
@@ -535,7 +554,7 @@ impl App {
         }));
         self.set(FEEDBACK, "");
         self.account_busy();
-        if action==Action::Register {self.set(FEEDBACK,"请在浏览器中完成 Google 登录");}
+        if matches!(action,Action::Register|Action::GoogleEmail) {self.set(FEEDBACK,"请在浏览器中完成 Google 登录");}
         Ok(())
     }
     unsafe fn account_load(&mut self, page: usize, cursor: String) -> Result<()> {
@@ -568,7 +587,7 @@ impl App {
     }
     pub(super) unsafe fn account_action(&mut self, id: u16) -> Result<()> {
         if id == GO_LOGIN { self.select_page(ACCOUNT_PAGE);return Ok(()); }
-        if id == SWITCH && let Some(registration) = &self.account.registration {
+        if matches!(id,SWITCH|GOOGLE_EMAIL) && let Some(registration) = &self.account.registration {
             if !registration.cancel() {
                 self.set(FEEDBACK, "正在完成注册，请稍候");
                 self.registration_button();
@@ -578,10 +597,9 @@ impl App {
             // A reply may already be queued. Never let it replace a newer attempt.
             self.account.request_id += 1;
             self.account.registration = None;
-            self.account.client = None;
-            self.account.clear();
+            if !self.account.logged_in(){self.account.client = None;self.account.clear();}
             self.render_account();
-            self.set(FEEDBACK, "已取消 Google 注册");
+            self.set(FEEDBACK, "已取消 Google 验证");
             return Ok(());
         }
         if self.account.task.is_some() && !matches!(id,COPY|COPY_AMOUNT) {return Ok(());}
@@ -606,6 +624,10 @@ impl App {
             return self.submit_account(action,"POST",if registering {"register"}else{"login"}.into(),json!({}),(0,String::new()),String::new());
         }
         ensure!(self.account.logged_in(), "请先登录");
+        if id==GOOGLE_EMAIL {
+            ensure!(self.account.me["account"]["google_registered"]==true,"当前 ID 未使用 Google 注册");
+            return self.submit_account(Action::GoogleEmail,"POST","register".into(),json!({}),(0,String::new()),String::new());
+        }
         if self.withdrawal_action(id)? { return Ok(()); }
         let action;
         let mut method = "GET";
@@ -778,7 +800,7 @@ impl App {
         self.set_identity_label(
             IDENTITY,
             &if logged {
-                text(&self.account.me["account"]["identity_id"])
+                identity::display(&self.account.me["account"])
             } else {
                 String::new()
             },
@@ -789,7 +811,7 @@ impl App {
             self.set(BALANCE,&money(&available));
             self.set(GIFT_BALANCE,&money(&gift));
             self.set(CASH_BALANCE,&money(&cash));
-            self.set(SUMMARY, &text(&self.account.me["account"]["identity_id"]));
+            self.set(SUMMARY, &identity::display(&self.account.me["account"]));
 
             self.set(
                 CONNECTION_STATE,
@@ -1007,6 +1029,14 @@ impl App {
         }
         let mut followup = false;
         match action {
+            Action::GoogleEmail => {
+                self.accept_router_access(&value["router_access"]);
+                self.account.me=value;
+                let saved=self.persist_identity();
+                let _=self.refresh_local_identities();
+                self.render_account();
+                self.set(FEEDBACK,if saved.is_ok(){"Google 邮箱已更新"}else{"邮箱已更新，本地保存失败"});
+            }
             Action::Login | Action::Register | Action::RegisterPlain => {
                 self.account.pending_identity=None;
                 self.accept_router_access(&value["router_access"]);
@@ -1025,6 +1055,7 @@ impl App {
                     )?;
                     Ok(())
                 })();
+                let _=self.refresh_local_identities();
                 self.render_account();
                 self.set(
                     FEEDBACK,
@@ -1231,6 +1262,7 @@ impl App {
     }
     unsafe fn persist_identity(&self) -> Result<()> {
         let session: Value = serde_json::from_slice(&self.account.session)?;
+        identity::cache_profile(self.path.parent().unwrap(),&self.account.base,&self.account.key_id,&self.account.me["account"])?;
         // Only identity/session data is cached. Wallet and financial records
         // are always loaded from the platform for the current account.
         identity::save(
@@ -1440,7 +1472,7 @@ mod tests {
             app.account.key_id=identity::create(&root,&app.account.base).unwrap();
             let fixture_id=app.account.key_id.clone();
             let fixture_public=app.user_signer().unwrap().public_key();
-            let view = json!({"account":{"id":"fixture-account","identity_id":fixture_id,"public_key":fixture_public,"role":"user","name":"Fixture"},"balance":{"enabled":true,"ceiling_microusd":20000000,"spent_microusd":500001,"promotional_microusd":600000,"withdrawable_microusd":18899999},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
+            let view = json!({"account":{"id":"fixture-account","identity_id":fixture_id,"public_key":fixture_public,"role":"user","name":"Fixture","google_registered":true,"google_email":"fixture@gmail.com"},"balance":{"enabled":true,"ceiling_microusd":20000000,"spent_microusd":500001,"promotional_microusd":600000,"withdrawable_microusd":18899999},"keys":[{"id":"k_fixture","label":"Laptop","prefix":"fixture","state":"enabled"}],"applications":[],"merchants":[]});
             let login = view.clone();
             let me = view.clone();
             let payment_calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -1519,6 +1551,13 @@ mod tests {
             app.bind_account().unwrap();
             complete(&mut app);
             assert!(!app.text(SUMMARY).contains("$19.499999"));
+            assert_eq!(app.text(SUMMARY),format!("{fixture_id}\r\nfixture@gmail.com"));
+            assert!(app.account.overview_summary().0.contains("fixture@gmail.com"));
+            assert!(identity::picker_label(&root,&app.account.base,&fixture_id).unwrap().contains("fixture@gmail.com"));
+            assert!(!app.account.visible(GOOGLE_EMAIL.hwnd(&app)));
+            app.account.me["account"]["google_email"]=Value::Null;
+            assert!(app.account.visible(GOOGLE_EMAIL.hwnd(&app)));
+            app.account.me["account"]["google_email"]=json!("fixture@gmail.com");
             assert!(app.text(BALANCE).contains("$19.499999"));
             assert_eq!(app.text(GIFT_BALANCE),"$0.60");
             assert_eq!(app.text(CASH_BALANCE),"$18.899999");
@@ -1728,7 +1767,7 @@ mod tests {
             app.account_action(SWITCH).unwrap();
             assert!(!registration.waiting());assert!(app.account.task.is_none());
             assert!(app.account.registration.is_none());assert!(app.account.client.is_none());
-            assert_eq!(app.text(SWITCH),"Google 注册 · 赠 $1");assert_eq!(app.text(FEEDBACK),"已取消 Google 注册");
+            assert_eq!(app.text(SWITCH),"Google 注册 · 赠 $1");assert_eq!(app.text(FEEDBACK),"已取消 Google 验证");
             assert!(app.account.pending_identity.is_none());
             assert_eq!(std::fs::read_dir(root.join("identities")).unwrap().count(),1,"cancelled registrations must not create any account file");
             assert!(app.text(REGISTRATION_POLICY).contains("普通注册无奖励"));
@@ -1748,6 +1787,16 @@ mod tests {
             assert!(!app.account.logged_in());assert!(app.account.session.is_empty());
             assert!(identity::load(&root).unwrap().is_none());
             app.account_action(SWITCH).unwrap();
+            // Cancelling old-account email verification keeps the logged-in identity.
+            app.account.me=json!({"account":{"role":"user","identity_id":app.account.key_id,"google_registered":true}});
+            app.account.client=Some(Arc::new(AccountClient::new("https://teerouter.org").unwrap()));
+            app.account.connection_id="existing-connection".into();app.account.connection_ready=true;
+            app.account.registration=Some(Arc::new(Registration::default()));
+            app.account.task=Some(app.runtime.spawn(std::future::pending()));
+            app.account_action(GOOGLE_EMAIL).unwrap();
+            assert!(app.account.logged_in());assert!(app.account.client.is_some());assert!(app.account.connection_ready);
+            assert_eq!(app.account.connection_id,"existing-connection");
+            assert_eq!(std::fs::read(&key_path).unwrap(),original);
             DestroyWindow(app.hwnd);std::fs::remove_dir_all(root).unwrap();
         }
     }

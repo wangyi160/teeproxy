@@ -538,17 +538,23 @@ impl App {
         GetClientRect(hwnd, &mut rect);
         let dc = GetDC(hwnd);
         let saved = SelectObject(dc, SendMessageW(hwnd, WM_GETFONT, 0, 0) as HGDIOBJ);
-        let text = wide(value);
-        let mut size = SIZE::default();
-        GetTextExtentPoint32W(dc, text.as_ptr(), (text.len() - 1) as i32, &mut size);
+        let mut lines=Vec::new();
+        for line in value.lines() {
+            let mut remaining=line;
+            while !remaining.is_empty() {
+                let mut end=remaining.len();
+                for (index,character) in remaining.char_indices() {
+                    let boundary=index+character.len_utf8();
+                    let text=wide(&remaining[..boundary]);let mut size=SIZE::default();
+                    GetTextExtentPoint32W(dc,text.as_ptr(),(text.len()-1) as i32,&mut size);
+                    if size.cx>rect.right.max(1) && index>0 {end=index;break;}
+                }
+                lines.push(remaining[..end].to_owned());remaining=&remaining[end..];
+            }
+        }
         SelectObject(dc, saved);
         ReleaseDC(hwnd, dc);
-        let displayed = if size.cx > rect.right && value.chars().count() > 1 {
-            let split = value.char_indices().nth(value.chars().count().div_ceil(2)).unwrap().0;
-            format!("{}\r\n{}", &value[..split], &value[split..])
-        } else {
-            value.to_owned()
-        };
+        let displayed = lines.join("\r\n");
         if self.text(id) != displayed {
             self.set(id, &displayed);
         }

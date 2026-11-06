@@ -177,6 +177,9 @@ impl AccountClient {
             Err(error) if error.status==404=>{},
             Err(error)=>return Err(error),
         }
+        self.google_email(signer,registration,open).await
+    }
+    pub async fn google_email(&self, signer: &crate::user_auth::Signer, registration: &Registration, open: impl Fn(&str) -> std::result::Result<(),Failure>) -> std::result::Result<Value,Failure> {
         registration.check()?;
         let challenge=self.request("POST","identity/challenge",json!({"role":"user","public_key":signer.public_key(),"purpose":"register"}),"").await?;
         let proof=signer.identity_proof(&challenge["challenge"],&self.base,"register").map_err(|_|Failure{status:401,message:"身份验证挑战无效".into()})?;
@@ -208,6 +211,9 @@ impl AccountClient {
         registration.finish()?;
         let result=self.request("POST","register",proof,"").await;
         let value=self.recover_registration(signer,result).await?;
+        if super::identity::google_email(&value["account"]).is_none() {
+            return Err(Failure{status:502,message:"Google 邮箱尚未保存，请重试验证".into()});
+        }
         self.check_identity(signer,value).await
     }
     async fn check_identity(&self,signer:&crate::user_auth::Signer,value:Value)->std::result::Result<Value,Failure>{
@@ -415,7 +421,7 @@ mod tests {
         let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base=format!("http://{}",listener.local_addr().unwrap());
         let signer=crate::user_auth::fixture();
-        let account=json!({"identity_id":signer.user_id(),"public_key":signer.public_key(),"role":"user"});
+        let account=json!({"identity_id":signer.user_id(),"public_key":signer.public_key(),"role":"user","google_registered":true,"google_email":"fixture@gmail.com"});
         let registered=Arc::new(AtomicBool::new(false));
         let delay_status=Arc::new(AtomicBool::new(true));
         let status_started=Arc::new(tokio::sync::Notify::new());
@@ -445,7 +451,7 @@ mod tests {
                 }
             }))
             .route("/portal/api/register",post(move|headers:HeaderMap,Json(v):Json<Value>|{let registered=registered_save.clone();let account=account.clone();async move{
-                assert!(headers.get("cookie").is_none());assert_eq!(v["google_flow_id"],format!("gf_{}","a".repeat(32)));
+                assert!(headers.get("cookie").is_none()||registered.load(Ordering::SeqCst));assert_eq!(v["google_flow_id"],format!("gf_{}","a".repeat(32)));
                 assert_eq!(v["google_poll_token"],"b".repeat(64));assert_eq!(v["role"],"user");
                 assert_eq!(v["signature"].as_str().unwrap().len(),128);registered.store(true,Ordering::SeqCst);
                 ([("set-cookie","teerouter_portal=registered; HttpOnly")],Json(json!({"account":account,"csrf":"csrf"})))
@@ -471,6 +477,10 @@ mod tests {
         assert_eq!(client.session.lock().await.cookie.as_str(),"teerouter_portal=registered");
         assert!(client.google_register(&signer,&Registration::default(),&open).await.is_ok());
         assert_eq!(opened.load(Ordering::SeqCst),2);
+        let updated=client.google_email(&signer,&Registration::default(),&open).await.unwrap_or_else(|e|panic!("{}",e.message));
+        assert_eq!(updated["account"]["google_email"],"fixture@gmail.com");
+        assert_eq!(updated["account"]["identity_id"],signer.user_id());
+        assert_eq!(opened.load(Ordering::SeqCst),3,"email verification must not short-circuit through login");
         server.abort();
     }
     #[test]

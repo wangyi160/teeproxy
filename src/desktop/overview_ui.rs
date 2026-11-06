@@ -43,7 +43,7 @@ pub(super) fn overview_rect(id: u16, width: i32) -> Option<[i32; 4]> {
     let link = |card: [i32; 4], w| [card[0] + card[2] - w - 12, card[1] + 12, w, 30];
     Some(match id {
         PROXY_STATE => metric(service),
-        ACCOUNT_NAME => [account[0] + 20, account[1] + 52, account[2] - 40, 48],
+        ACCOUNT_NAME => [account[0] + 20, account[1] + 44, account[2] - 40, 64],
         BALANCE => metric(balance),
         OPEN_LOG => link(service, 52),
         OPEN_ACCOUNT => link(account, 52),
@@ -75,7 +75,7 @@ impl App {
         self.building_page = Some(OVERVIEW);
         for (id, font) in [
             (PROXY_STATE, 3),
-            (ACCOUNT_NAME, 0),
+            (ACCOUNT_NAME, 2),
             (BALANCE, 3),
             (ROUTE_OVERVIEW, 4),
             (ROUTE_TARGET, 0),

@@ -22,7 +22,9 @@ impl Pending {
         let signer=self.signer()?;
         ensure!(response["account"]["role"]=="user" && response["account"]["identity_id"]==signer.user_id()
             && response["account"]["public_key"]==signer.public_key(),"注册结果与本机身份不一致");
-        store_key(directory,platform,&self.seed)
+        let id=store_key(directory,platform,&self.seed)?;
+        cache_profile(directory,platform,&id,&response["account"])?;
+        Ok(id)
     }
 }
 #[cfg(test)]
@@ -71,6 +73,33 @@ pub(super) fn identities(directory:&Path,platform:&str)->Result<Vec<String>>{
         if key(directory,platform,id).is_ok(){ids.push(id.to_owned());}
     }
     ids.sort();Ok(ids)
+}
+pub(super) fn google_email(account:&Value)->Option<&str> {
+    (account["google_registered"]==true).then(||account["google_email"].as_str()).flatten()
+        .filter(|email|!email.is_empty()&&email.len()<=254&&email.contains('@')&&!email.chars().any(char::is_control))
+}
+pub(super) fn display(account:&Value)->String {
+    let id=account["identity_id"].as_str().unwrap_or("");
+    match google_email(account) {Some(email)=>format!("{id}\r\n{email}"),None=>id.to_owned()}
+}
+pub(super) fn cache_profile(directory:&Path,platform:&str,id:&str,account:&Value)->Result<()> {
+    let signer=key(directory,platform,id)?;
+    ensure!(account["role"]=="user"&&account["identity_id"]==id&&account["public_key"]==signer.public_key(),"账户信息与本地身份不一致");
+    // Older platforms may omit display metadata. Never invent an email or replace a key.
+    if account.get("google_registered").is_none(){return Ok(());}
+    let path=directory.join("identities").join(format!("{id}.dpapi"));
+    let bytes=settings::crypt(&std::fs::read(&path)?,false)?;
+    let mut value:Value=serde_json::from_slice(&bytes)?;
+    let email=google_email(account).map(|s|Value::String(s.into())).unwrap_or(Value::Null);
+    if value["google_registered"]==account["google_registered"]&&value["google_email"]==email{return Ok(());}
+    value["google_registered"]=Value::Bool(account["google_registered"]==true);value["google_email"]=email;
+    write(&path,&settings::crypt(&Zeroizing::new(serde_json::to_vec(&value)?),true)?)
+}
+pub(super) fn picker_label(directory:&Path,platform:&str,id:&str)->Result<String> {
+    key(directory,platform,id)?;
+    let bytes=settings::crypt(&std::fs::read(directory.join("identities").join(format!("{id}.dpapi")))?,false)?;
+    let value:Value=serde_json::from_slice(&bytes)?;
+    Ok(match google_email(&value){Some(email)=>format!("{email}  ·  {id}"),None=>id.into()})
 }
 pub(super) fn migrate(directory:&Path,saved:&Value)->Result<String>{
     let platform=saved["platform"].as_str().ok_or_else(||anyhow::anyhow!("平台地址无效"))?;
@@ -173,6 +202,26 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn verified_google_email_is_encrypted_account_scoped_display_metadata() {
+        let root=std::env::temp_dir().join(format!("teeproxy-email-{}",account_client::operation_id().unwrap()));
+        let base="https://platform.example";let pending=Pending::generate().unwrap();let signer=pending.signer().unwrap();
+        let account=serde_json::json!({"role":"user","identity_id":signer.user_id(),"public_key":signer.public_key(),"google_registered":true,"google_email":"member@gmail.com"});
+        let id=pending.confirm(&root,base,&serde_json::json!({"account":account})).unwrap();
+        assert_eq!(display(&account),format!("{id}\r\nmember@gmail.com"));
+        assert_eq!(picker_label(&root,base,&id).unwrap(),format!("member@gmail.com  ·  {id}"));
+        let path=root.join("identities").join(format!("{id}.dpapi"));let before=std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&before).contains("member@gmail.com"));
+        cache_profile(&root,base,&id,&account).unwrap();assert_eq!(std::fs::read(&path).unwrap(),before);
+        let other=create(&root,base).unwrap();
+        assert_eq!(picker_label(&root,base,&other).unwrap(),other);
+        assert!(cache_profile(&root,base,&other,&account).is_err());
+        clear(&root).unwrap();assert!(picker_label(&root,base,&id).unwrap().contains("member@gmail.com"));
+        assert_eq!(key(&root,base,&id).unwrap().public_key(),signer.public_key());
+        assert!(picker_label(&root,"https://other.example",&id).is_err());
+        assert_eq!(display(&serde_json::json!({"identity_id":id,"google_email":"unverified@gmail.com"})),id);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn registration_key_is_memory_only_until_matching_success_is_confirmed() {
         let root=std::env::temp_dir().join(format!("teeproxy-pending-{}",account_client::operation_id().unwrap()));
