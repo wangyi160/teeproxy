@@ -150,6 +150,25 @@ pub(super) fn error_message(code: &str, status: u16) -> String {
     message.into()
 }
 impl AccountClient {
+    pub async fn plain_register(&self, signer: &crate::user_auth::Signer) -> std::result::Result<Value,Failure> {
+        // Recover a successful request whose response was lost, using the same memory-only key.
+        match self.identity_login(signer,"login").await {
+            Ok(value)=>Ok(value),
+            Err(error) if error.status==404=>{
+                let result=self.identity_login(signer,"register").await;
+                self.recover_registration(signer,result).await
+            },
+            Err(error)=>Err(error),
+        }
+    }
+    async fn recover_registration(&self, signer:&crate::user_auth::Signer,result:std::result::Result<Value,Failure>)->std::result::Result<Value,Failure> {
+        match result {
+            Err(error) if error.status==0 || error.status>=500 => {
+                match self.identity_login(signer,"login").await {Ok(value)=>Ok(value),Err(_)=>Err(error)}
+            },
+            result=>result,
+        }
+    }
     pub async fn google_register(&self, signer: &crate::user_auth::Signer, registration: &Registration, open: impl Fn(&str) -> std::result::Result<(),Failure>) -> std::result::Result<Value,Failure> {
         registration.check()?;
         // A lost registration response must not send the same identity through OAuth again.
@@ -187,7 +206,8 @@ impl AccountClient {
         let mut proof=signer.identity_proof(&challenge["challenge"],&self.base,"register").map_err(|_|Failure{status:401,message:"身份验证挑战无效".into()})?;
         proof["google_flow_id"]=json!(flow_id);proof["google_poll_token"]=json!(poll.as_str());
         registration.finish()?;
-        let value=self.request("POST","register",proof,"").await?;
+        let result=self.request("POST","register",proof,"").await;
+        let value=self.recover_registration(signer,result).await?;
         self.check_identity(signer,value).await
     }
     async fn check_identity(&self,signer:&crate::user_auth::Signer,value:Value)->std::result::Result<Value,Failure>{
@@ -469,6 +489,39 @@ mod tests {
         assert!(allowed("POST", "connection"));
         assert!(platform("http://127.0.0.1").is_err());
         assert!(platform("https://user:secret@example.com").is_err());
+    }
+    #[tokio::test]
+    async fn ordinary_registration_uses_no_google_ticket_and_recovers_a_lost_response() {
+        use axum::{Json,Router,http::StatusCode,routing::post};
+        use std::sync::{Arc,atomic::{AtomicBool,AtomicUsize,Ordering}};
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base=format!("http://{}",listener.local_addr().unwrap());
+        let signer=crate::user_auth::fixture();let public=signer.public_key();let origin=base.clone();
+        let account=json!({"role":"user","identity_id":signer.user_id(),"public_key":public});
+        let registered=Arc::new(AtomicBool::new(false));let writes=Arc::new(AtomicUsize::new(0));
+        let login_state=registered.clone();let saved=registered.clone();let write_count=writes.clone();
+        let mock=Router::new()
+            .route("/portal/api/identity/challenge",post(move|Json(v):Json<Value>|{let origin=origin.clone();let public=public.clone();async move{
+                Json(json!({"challenge":{"origin":origin,"purpose":v["purpose"],"role":"user","public_key":public,"id":"challenge","nonce":"nonce",
+                    "expires":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()+300}}))
+            }}))
+            .route("/portal/api/login",post(move||{let registered=login_state.clone();let account=account.clone();async move{
+                if registered.load(Ordering::SeqCst) {(StatusCode::OK,[("set-cookie","teerouter_portal=plain")],Json(json!({"account":account,"csrf":"csrf","balance":{"promotional_microusd":0}})))}
+                else {(StatusCode::NOT_FOUND,[("set-cookie","")],Json(json!({"error":"identity_not_registered"})))}
+            }}))
+            .route("/portal/api/register",post(move|Json(v):Json<Value>|{let saved=saved.clone();let writes=write_count.clone();async move{
+                assert!(v.get("google_flow_id").is_none());assert!(v.get("google_poll_token").is_none());
+                assert_eq!(v["role"],"user");assert_eq!(v["signature"].as_str().unwrap().len(),128);
+                writes.fetch_add(1,Ordering::SeqCst);saved.store(true,Ordering::SeqCst);
+                (StatusCode::BAD_GATEWAY,Json(json!({"error":"lost_registration_response"})))
+            }}));
+        let server=tokio::spawn(async {axum::serve(listener,mock).await.unwrap()});
+        let client=AccountClient::test_client(base);
+        let result=client.plain_register(&signer).await.ok().unwrap();
+        assert_eq!(result["account"]["identity_id"],signer.user_id());assert_eq!(result["balance"]["promotional_microusd"],0);
+        assert_eq!(writes.load(Ordering::SeqCst),1);
+        assert!(client.plain_register(&signer).await.is_ok());assert_eq!(writes.load(Ordering::SeqCst),1);
+        server.abort();
     }
     #[tokio::test]
     async fn sessions_are_scoped_and_cleared_on_expiry_or_wrong_role() {

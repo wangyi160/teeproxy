@@ -8,18 +8,33 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use zeroize::Zeroizing;
 
+pub(super) struct Pending {
+    seed: Zeroizing<Vec<u8>>,
+}
+impl Pending {
+    pub fn generate() -> Result<Self> {
+        let mut seed=Zeroizing::new(vec![0;32]);
+        getrandom::getrandom(&mut seed).map_err(|_|anyhow::anyhow!("无法生成身份"))?;
+        Ok(Self {seed})
+    }
+    pub fn signer(&self) -> Result<crate::user_auth::Signer> {crate::user_auth::Signer::from_seed(&self.seed)}
+    pub fn confirm(&self,directory:&Path,platform:&str,response:&Value)->Result<String> {
+        let signer=self.signer()?;
+        ensure!(response["account"]["role"]=="user" && response["account"]["identity_id"]==signer.user_id()
+            && response["account"]["public_key"]==signer.public_key(),"注册结果与本机身份不一致");
+        store_key(directory,platform,&self.seed)
+    }
+}
+#[cfg(test)]
 pub(super) fn create(directory: &Path, platform: &str) -> Result<String> {
-    let mut seed=Zeroizing::new(vec![0;32]);
-    getrandom::getrandom(&mut seed).map_err(|_|anyhow::anyhow!("无法生成身份"))?;
-    let id=store_key(directory,platform,&seed)?;
-    pending_registration(directory,platform,&id,true)?;
-    Ok(id)
+    store_key(directory,platform,&Pending::generate()?.seed)
 }
 pub(super) fn pending_registration(directory:&Path,platform:&str,id:&str,pending:bool)->Result<()> {
     key(directory,platform,id)?;
     let path=directory.join("identities").join(format!("{id}.dpapi"));
     let bytes=settings::crypt(&std::fs::read(&path)?,false)?;
     let mut value:Value=serde_json::from_slice(&bytes)?;
+    if (value["registration_pending"]==true)==pending {return Ok(());}
     value["registration_pending"]=Value::Bool(pending);
     write(&path,&settings::crypt(&Zeroizing::new(serde_json::to_vec(&value)?),true)?)
 }
@@ -158,6 +173,23 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registration_key_is_memory_only_until_matching_success_is_confirmed() {
+        let root=std::env::temp_dir().join(format!("teeproxy-pending-{}",account_client::operation_id().unwrap()));
+        let pending=Pending::generate().unwrap();let signer=pending.signer().unwrap();
+        assert!(!root.exists());
+        assert!(pending.confirm(&root,"https://platform.example",&serde_json::json!({"error":"registration_failed"})).is_err());
+        assert!(!root.exists());
+        drop(pending);assert!(!root.exists(),"discarding an unfinished registration must not store a draft");
+        let pending=Pending::generate().unwrap();let second=pending.signer().unwrap();
+        assert_ne!(signer.user_id(),second.user_id());
+        let account=serde_json::json!({"account":{"role":"user","identity_id":second.user_id(),"public_key":second.public_key()}});
+        let id=pending.confirm(&root,"https://platform.example",&account).unwrap();
+        assert_eq!(identities(&root,"https://platform.example").unwrap(),vec![id.clone()]);
+        assert!(!is_pending(&root,"https://platform.example",&id).unwrap());
+        assert_eq!(key(&root,"https://platform.example",&id).unwrap().public_key(),second.public_key());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn independent_ids_survive_logout_and_legacy_migration_preserves_the_key() {
         let root=std::env::temp_dir().join(format!("teeproxy-identities-{}",account_client::operation_id().unwrap()));

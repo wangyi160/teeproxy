@@ -37,6 +37,8 @@ const CONNECTION_STATE: u16 = 1547;
 const USAGE_SUMMARY: u16 = 1548;
 const GIFT_BALANCE: u16 = 1549;
 const CASH_BALANCE: u16 = 1550;
+const REGISTER_PLAIN: u16 = 1551;
+const REGISTRATION_POLICY: u16 = 1552;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub(super) enum Panel {
@@ -87,6 +89,7 @@ pub(super) enum Action {
     Load,
     Login,
     Register,
+    RegisterPlain,
     Logout,
     Bind,
     Payment,
@@ -110,6 +113,7 @@ pub(super) struct State {
     pub task: Option<JoinHandle<()>>,
     request_id: u64,
     registration: Option<Arc<Registration>>,
+    pending_identity: Option<Arc<identity::Pending>>,
     pub panel: Panel,
     key_id: String,
     local_ids: Vec<String>,
@@ -141,6 +145,7 @@ impl Default for State {
             task: None,
             request_id: 0,
             registration: None,
+            pending_identity: None,
             panel: Panel::Overview,
             key_id: String::new(),
             local_ids: Vec::new(),
@@ -191,6 +196,7 @@ impl State {
         self.logged_in() && self.panel.has_table() && self.rows.is_empty() && self.task.is_some()
     }
     fn clear(&mut self) {
+        self.pending_identity = None;
         self.me = Value::Null;
         self.view = Value::Null;
         self.rows.clear();
@@ -313,7 +319,9 @@ impl App {
         self.label("本地 ID",[268,190,150,24],0)?;
         self.add(USERNAME,w!("COMBOBOX"),"",WS_TABSTOP | CBS_DROPDOWNLIST as u32 | WS_VSCROLL,[268,224,-330,260],0)?;
         self.button(SUBMIT,"使用此 ID",[268,278,150,40],0)?;
-        self.button(SWITCH,"Google 注册",[434,278,150,40],0)?;
+        self.button(REGISTER_PLAIN,"普通注册",[434,278,150,40],0)?;
+        self.button(SWITCH,"Google 注册 · 赠 $1",[600,278,192,40],0)?;
+        self.add(REGISTRATION_POLICY,w!("STATIC"),"普通注册无奖励；Google 注册赠送 $1。\r\n同一 Google 账号限领一次，赠送额度仅可消费，不可提现或退款。",SS_LEFT,[268,336,-330,56],2)?;
         self.account_group(start,Group::Picker);
         let start=self.controls.len();
         self.add(IDENTITY, w!("STATIC"), "", SS_LEFT, [260, 134, -312, 44], 0)?;
@@ -324,11 +332,11 @@ impl App {
         self.button(GO_LOGIN, "前往登录", [268, 264, 150, 40], 0)?;
         self.account_group(start, Group::Locked);
         let start = self.controls.len();
-        self.label("当前 ID",[268,356,132,24],0)?;
-        self.edit(SUMMARY,"",[268,390,-330,64],(ES_READONLY | ES_MULTILINE) as u32,"")?;
-        self.label("连接状态",[268,478,132,24],0)?;
-        self.add(CONNECTION_STATE,w!("STATIC"),"",SS_LEFT,[420,478,-480,44],0)?;
-        self.button(LOGOUT,"退出此 ID",[268,540,132,38],0)?;
+        self.label("当前 ID",[268,406,132,24],0)?;
+        self.edit(SUMMARY,"",[268,440,-330,64],(ES_READONLY | ES_MULTILINE) as u32,"")?;
+        self.label("连接状态",[268,526,132,24],0)?;
+        self.add(CONNECTION_STATE,w!("STATIC"),"",SS_LEFT,[420,526,-480,44],0)?;
+        self.button(LOGOUT,"退出此 ID",[268,584,132,38],0)?;
         self.account_group(start, Group::Panel(Panel::Overview));
         let start = self.controls.len();
         self.table(
@@ -393,7 +401,7 @@ impl App {
     }
     unsafe fn registration_button(&self) {
         let registration = self.account.registration.as_ref();
-        self.set(SWITCH, match registration { Some(r) if r.waiting() => "取消注册", Some(_) => "正在注册", None => "Google 注册" });
+        self.set(SWITCH, match registration { Some(r) if r.waiting() => "取消注册", Some(_) => "正在注册", None => "Google 注册 · 赠 $1" });
         EnableWindow(SWITCH.hwnd(self), (registration.map_or(self.account.task.is_none(), |r| r.waiting())) as i32);
     }
     unsafe fn account_busy(&self) {
@@ -406,6 +414,7 @@ impl App {
 
                         | SUBMIT
                         | SWITCH
+                        | REGISTER_PLAIN
                         | LOGOUT
                         | NETWORK
                         | AMOUNT
@@ -482,6 +491,9 @@ impl App {
         let method = method.to_owned();
         let panel = self.account.panel;
         let signer=self.user_signer().ok();
+        let pending_identity=self.account.pending_identity.clone();
+        let directory=self.path.parent().unwrap().to_owned();
+        let base=self.account.base.clone();
         self.account.request_id += 1;
         let request_id = self.account.request_id;
         let registration = (action == Action::Register).then(|| Arc::new(Registration::default()));
@@ -489,6 +501,8 @@ impl App {
         self.account.task = Some(self.runtime.spawn(async move {
             let result = if action==Action::Register {
                 match &signer {Some(key)=>client.google_register(key,registration.as_ref().unwrap(),account_client::open_google_page).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
+            } else if action==Action::RegisterPlain {
+                match &signer {Some(key)=>client.plain_register(key).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()})}
             } else if action==Action::Login {
                 match &signer { Some(key)=>client.identity_login(key,&route).await,None=>Err(Failure{status:0,message:"本地身份不可用".into()}) }
             } else if action == Action::Load {
@@ -499,6 +513,15 @@ impl App {
                 result
             } else {
                 client.request(&method, &route, body, &operation).await
+            };
+            // Only a verified successful registration may create a local account file.
+            // The memory-only key is discarded on cancellation or a definite failure.
+            let result=match (result,pending_identity) {
+                (Ok(value),Some(pending)) if matches!(action,Action::Register|Action::RegisterPlain)=>{
+                    pending.confirm(&directory,&base,&value)
+                        .map(|_|value).map_err(|_|Failure{status:0,message:"注册已成功，但账号文件保存失败，请检查数据目录后重试".into()})
+                },
+                (result,_)=>result,
             };
             let _ = sender.send(Event::Account(Reply {
                 request_id,
@@ -562,19 +585,25 @@ impl App {
             return Ok(());
         }
         if self.account.task.is_some() && !matches!(id,COPY|COPY_AMOUNT) {return Ok(());}
-        if matches!(id,SUBMIT|SWITCH) {
+        if matches!(id,SUBMIT|SWITCH|REGISTER_PLAIN) {
             let base=account_client::platform(&self.text(PLATFORM))?;
-            let mut registering=id==SWITCH;
-            let key_id=if registering {identity::create(self.path.parent().unwrap(),&base)?} else {
+            let action=match id {SWITCH=>Action::Register,REGISTER_PLAIN=>Action::RegisterPlain,_=>Action::Login};
+            let registering=action!=Action::Login;
+            let pending=if registering {
+                Some(if self.account.base==base {
+                    match &self.account.pending_identity {Some(key)=>key.clone(),None=>Arc::new(identity::Pending::generate()?)}
+                }else{Arc::new(identity::Pending::generate()?)})
+            }else{None};
+            let key_id=if let Some(pending)=&pending {pending.signer()?.user_id()} else {
                 let index=SendMessageW(USERNAME.hwnd(self),CB_GETCURSEL,0,0);
                 self.account.local_ids.get(index as usize).cloned().context("请选择本地 ID，或注册新 ID")?
             };
-            registering=registering||identity::is_pending(self.path.parent().unwrap(),&base,&key_id)?;
             self.disconnect_identity()?;self.account.clear();
+            self.account.pending_identity=pending;
             self.account.key_id=key_id;self.account.base=base.clone();
             self.account.client=Some(Arc::new(AccountClient::new(&base)?));
             self.refresh_local_identities()?;self.render_account();
-            return self.submit_account(if registering {Action::Register}else{Action::Login},"POST",if registering {"register"}else{"login"}.into(),json!({}),(0,String::new()),String::new());
+            return self.submit_account(action,"POST",if registering {"register"}else{"login"}.into(),json!({}),(0,String::new()),String::new());
         }
         ensure!(self.account.logged_in(), "请先登录");
         if self.withdrawal_action(id)? { return Ok(()); }
@@ -935,6 +964,9 @@ impl App {
         let value = match reply.result {
             Ok(value) => value,
             Err(error) => {
+                if matches!(action,Action::Register|Action::RegisterPlain) && (400..500).contains(&error.status) {
+                    self.account.pending_identity=None;
+                }
                 if error.status == 401 || action == Action::Logout {
                     let _ = self.disconnect_identity();
                     self.account.clear();
@@ -975,10 +1007,12 @@ impl App {
         }
         let mut followup = false;
         match action {
-            Action::Login | Action::Register => {
+            Action::Login | Action::Register | Action::RegisterPlain => {
+                self.account.pending_identity=None;
                 self.accept_router_access(&value["router_access"]);
                 self.account.me = value;
                 if let Err(error)=identity::pending_registration(self.path.parent().unwrap(),&self.account.base,&self.account.key_id,false){self.set(FEEDBACK,&error.to_string());}
+                let _=self.refresh_local_identities();
                 self.account.bind_retry = true;
                 self.account.refresh_pending =
                     is_account_page(self.page) && self.page != ACCOUNT_PAGE;
@@ -1113,7 +1147,7 @@ impl App {
         {
             self.set(FEEDBACK, &e.to_string());
         }
-        if matches!(action, Action::Login | Action::Register)
+        if matches!(action, Action::Login | Action::Register | Action::RegisterPlain)
             && let Err(e) = self.bind_account()
         {
             self.set(FEEDBACK, &e.to_string());
@@ -1131,6 +1165,7 @@ impl App {
         }
     }
     pub(super) fn user_signer(&self) -> Result<crate::user_auth::Signer> {
+        if let Some(pending)=&self.account.pending_identity {return pending.signer();}
         if !self.account.key_id.is_empty(){ return identity::key(self.path.parent().unwrap(),&self.account.base,&self.account.key_id); }
         identity::signer(self.path.parent().unwrap(), &self.account.base, self.account.me["account"]["id"].as_str().context("请选择身份")?)
     }
@@ -1681,6 +1716,8 @@ mod tests {
             let key_path=root.join("identities").join(format!("{}.dpapi",app.account.key_id));
             let original=std::fs::read(&key_path).unwrap();
             app.refresh_local_identities().unwrap();
+            app.account.pending_identity=Some(Arc::new(identity::Pending::generate().unwrap()));
+            app.account.key_id=app.account.pending_identity.as_ref().unwrap().signer().unwrap().user_id();
             let registration=Arc::new(Registration::default());
             app.account.registration=Some(registration.clone());app.account.request_id=1;
             app.account.task=Some(app.runtime.spawn(std::future::pending()));
@@ -1691,7 +1728,13 @@ mod tests {
             app.account_action(SWITCH).unwrap();
             assert!(!registration.waiting());assert!(app.account.task.is_none());
             assert!(app.account.registration.is_none());assert!(app.account.client.is_none());
-            assert_eq!(app.text(SWITCH),"Google 注册");assert_eq!(app.text(FEEDBACK),"已取消 Google 注册");
+            assert_eq!(app.text(SWITCH),"Google 注册 · 赠 $1");assert_eq!(app.text(FEEDBACK),"已取消 Google 注册");
+            assert!(app.account.pending_identity.is_none());
+            assert_eq!(std::fs::read_dir(root.join("identities")).unwrap().count(),1,"cancelled registrations must not create any account file");
+            assert!(app.text(REGISTRATION_POLICY).contains("普通注册无奖励"));
+            assert!(app.text(REGISTRATION_POLICY).contains("限领一次"));
+            assert!(app.text(REGISTRATION_POLICY).contains("不可提现或退款"));
+            assert_ne!(IsWindowEnabled(REGISTER_PLAIN.hwnd(&app)),0);
             assert_ne!(IsWindowEnabled(SUBMIT.hwnd(&app)),0);
             assert_eq!(std::fs::read(&key_path).unwrap(),original,"cancellation must preserve the local signing key");
             let next=Arc::new(Registration::default());
